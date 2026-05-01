@@ -212,6 +212,7 @@ class ModelServer:
             asyncio.create_task(self._audio_loop()),
             asyncio.create_task(self._asr_worker()),
             asyncio.create_task(self._punc_worker()),
+            asyncio.create_task(self._text_processor_timer()),
         ]
 
         log("ModelServer started")
@@ -480,7 +481,6 @@ class ModelServer:
         """PUNC 工作线程 - 使用 TextProcessor"""
         log("PUNC_WORKER: started (using TextProcessor)")
         loop = asyncio.get_event_loop()
-        punc_count = 0
 
         while self._running:
             try:
@@ -490,7 +490,6 @@ class ModelServer:
                     )
                     if text:
                         log(f"PUNC_WORKER: got text len={len(text)}")
-                        punc_count += 1
 
                         # PUNC 处理
                         punctuated = await loop.run_in_executor(
@@ -500,15 +499,14 @@ class ModelServer:
                         )
 
                         if punctuated:
-                            # TextProcessor 预处理 + 后处理
+                            # TextProcessor 预处理
                             current_time = time.time()
                             cleaned = self._text_processor.preprocess(punctuated)
-                            output_text, status = self._text_processor.postprocess(
-                                cleaned, current_time
-                            )
-
+                            # 添加到累积缓冲区
+                            self._text_processor.append(cleaned)
+                            # 检查是否需要输出
+                            output_text, status = self._text_processor.tick(current_time)
                             if output_text:
-                                # 构建输出
                                 output = self._build_output(output_text, status, current_time)
                                 log(f"  PUNC out({status}): {repr(output_text[:80])}")
                                 await self._send_output(output)
@@ -518,6 +516,26 @@ class ModelServer:
 
             except Exception as e:
                 log(f"Punc worker error: {e}")
+
+    async def _text_processor_timer(self):
+        """TextProcessor 定时器 - 每3秒检查输出"""
+        log("TEXT_PROCESSOR_TIMER: started")
+        TEXT_CHECK_INTERVAL = 3.0
+
+        while self._running:
+            try:
+                await asyncio.sleep(TEXT_CHECK_INTERVAL)
+
+                current_time = time.time()
+                output_text, status = self._text_processor.tick(current_time)
+
+                if output_text:
+                    output = self._build_output(output_text, status, current_time)
+                    log(f"  TIMER out({status}): {repr(output_text[:80])}")
+                    await self._send_output(output)
+
+            except Exception as e:
+                log(f"Text processor timer error: {e}")
 
     def _punc_process(self, text: str) -> str:
         """标点处理"""
@@ -531,13 +549,28 @@ class ModelServer:
         return text
 
     def _build_output(self, text: str, status: str, current_time) -> str:
-        """构建输出内容"""
+        """构建输出内容
+
+        Args:
+            text: 要输出的文本
+            status: "newline" / "continuous"
+            current_time: 当前时间戳
+
+        Returns:
+            - "newline": \n + 时间头 + 文本 + \n
+            - "continuous": 文本（无时间头，无换行）
+        """
         import time as time_module
         text = text.strip()
         if not text:
             return ""
-        time_header = time_module.strftime("[%H:%M:%S]", time_module.localtime(current_time))
-        return f"{time_header} {text}\n"
+
+        if status == "newline":
+            time_header = time_module.strftime("[%H:%M:%S]", time_module.localtime(current_time))
+            return f"\n{time_header} {text}\n"
+        else:
+            # continuous: 不加时间头，不加换行
+            return text
 
     async def _send_output(self, text: str):
         """发送文本输出 (通过回调)"""
