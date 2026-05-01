@@ -34,6 +34,20 @@ def _get_pid_file_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".funasr.pid")
 
 
+def _is_process_running(pid: int) -> bool:
+    """检查进程是否存活"""
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except ImportError:
+        # psutil 不可用时，用 os.kill 信号检测
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
 def _acquire_windows():
     """Windows: 使用 msvcrt 文件锁"""
     import msvcrt
@@ -41,22 +55,48 @@ def _acquire_windows():
 
     pid_file = _get_pid_file_path()
 
+    # Step 1: 检查是否有旧的 PID 文件和残留锁
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file, 'r') as f:
+                old_pid = int(f.read().strip())
+            # 检查旧进程是否还在运行
+            if _is_process_running(old_pid):
+                print(f"Error: 服务已在运行 (PID: {old_pid})，请先关闭现有实例")
+                return False
+            else:
+                # 旧进程已死，清理残留文件
+                print(f"Warning: 发现残留 PID 文件 (PID: {old_pid})，已清理")
+                try:
+                    os.remove(pid_file)
+                except:
+                    pass
+        except (ValueError, IOError):
+            # 文件为空或损坏，删除重建
+            try:
+                os.remove(pid_file)
+            except:
+                pass
+
+    # Step 2: 获取新锁
     try:
-        f = open(pid_file, 'r+')
-    except FileNotFoundError:
         f = open(pid_file, 'w+')
+    except Exception as e:
+        print(f"Error: 无法创建 PID 文件 ({e})")
+        return False
 
     try:
-        # LK_NBLCK = non-blocking lock
         msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
         f.seek(0)
         f.write(str(os.getpid()))
         f.flush()
 
-        # 清理函数
         def cleanup():
             try:
                 f.close()
+            except:
+                pass
+            try:
                 if os.path.exists(pid_file):
                     os.remove(pid_file)
             except:
