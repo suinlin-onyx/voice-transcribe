@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
+
+# Models (downloaded)
+models/
+
+# Virtual env
+.venv/
+venv/
+
+# Temp
+*.tmp
+.vt_test.log

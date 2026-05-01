@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/d/arvin/obsidian_workpace/voice-transcribe/.venv/Scripts/python.exe --version)",
+      "Bash(sort -k4 -n -r)"
+    ]
+  }
+}
