@@ -59,6 +59,7 @@ from processors.asr_processor import create_asr_processor
 from processors.punc_processor import create_punc_processor
 from processors.hotword_manager import HotwordManager
 from text_processor import TextProcessor
+from config import load_config
 
 
 def get_model_memory_info(model) -> dict:
@@ -121,7 +122,7 @@ class ModelServer:
     """
 
     def __init__(self, config: dict = None):
-        self.config = config or self._default_config()
+        self.config = config or load_config()
 
         max_workers = self.config.get("threading", {}).get("max_workers", 4)
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -139,57 +140,29 @@ class ModelServer:
         self._punc = None
         self._hotword_manager: Optional[HotwordManager] = None
 
-        # Text Processor (新增)
-        self._text_processor = TextProcessor()
+        # Text Processor (从配置加载)
+        tp_config = self.config.get("text_processor", {})
+        self._text_processor = TextProcessor(
+            punctuation=tp_config.get("punctuation", "。！？.!?"),
+            split_punctuation=tp_config.get("split_punctuation", "，。！？.!?"),
+            silence_threshold=tp_config.get("silence_threshold", 2.0),
+            max_accumulate=tp_config.get("max_accumulate", 6.0),
+            check_interval=tp_config.get("check_interval", 3.0),
+            dedup_window=tp_config.get("dedup_window", 5.0),
+        )
 
         # 状态
         self._running = False
         self._transcribing = False
         self._models_loaded = False
         self._load_start: Optional[float] = None
+        self._is_first_line = True  # 首行标志
 
         # 回调 (API Server 设置)
         self._on_text_output: Optional[callable] = None
 
         # 任务
         self._tasks: list = []
-
-    def _default_config(self) -> dict:
-        """默认配置"""
-        return {
-            "audio": {
-                "sample_rate": 16000,
-                "channels": 1,
-                "device": None,
-                "devices": None,
-            },
-            "vad": {
-                "mode": "sensevoice",
-                "threshold": 0.5,
-                "min_speech_duration": 0.3,
-                "max_speech_duration": 5.0,
-                "silence_timeout": 4.0,
-            },
-            "asr": {
-                "model": "iic/SenseVoiceSmall",
-                "device": "cuda",
-            },
-            "punc": {
-                "model": "ct-punc",
-                "enabled": True,
-            },
-            "hotwords": {
-                "load_from_notes": True,
-                "notes_path": "D:/arvin/obsidian_workpace/arvin-notes/00.raw/01.投资研究/",
-            },
-            "threading": {
-                "max_workers": 4,
-            },
-            "queue": {
-                "asr_size": 20,
-                "punc_size": 50,
-            },
-        }
 
     def set_output_callback(self, callback: callable):
         """设置文本输出回调 (API Server 调用)"""
@@ -355,13 +328,34 @@ class ModelServer:
             return {"success": False, "message": f"Models still loading ({elapsed}s elapsed)"}
 
         self._transcribing = True
+        self._is_first_line = True  # 重置首行标志
         self._audio_source.start()
         return {"success": True, "message": "Transcription started"}
 
     def stop_transcribing(self):
         """停止转写"""
         self._transcribing = False
+        self._is_first_line = True  # 重置首行标志
+
+        # 1. 停止音频采集
         self._audio_source.stop()
+
+        # 2. 清空各队列（不处理 pending 的音频）
+        while not self._asr_queue.empty():
+            try:
+                self._asr_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        while not self._punc_queue.empty():
+            try:
+                self._punc_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        # 3. 清空 TextProcessor buffer
+        self._text_processor.reset()
+
+        log("Transcription stopped and pipeline cleared")
         return {"success": True, "message": "Transcription stopped"}
 
     def reload_text_processor(self):
@@ -455,7 +449,8 @@ class ModelServer:
                 if result and result.text:
                     log(f"ASR_WORKER: recognized '{result.text[:50]}...'")
                     if not self._punc_queue.full():
-                        await self._punc_queue.put(result.text)
+                        # 传递 (文本, 是否截断) 元组
+                        await self._punc_queue.put((result.text, segment.force_ended))
                 else:
                     log("ASR_WORKER: no text result")
 
@@ -485,31 +480,51 @@ class ModelServer:
         while self._running:
             try:
                 try:
-                    text = await asyncio.wait_for(
+                    # 接收 (文本, 是否截断) 元组
+                    item = await asyncio.wait_for(
                         self._punc_queue.get(), timeout=0.05
                     )
-                    if text:
-                        log(f"PUNC_WORKER: got text len={len(text)}")
+                    if item:
+                        text, force_ended = item  # 解包
+                        log(f"PUNC_WORKER: got text len={len(text)}, force_ended={force_ended}")
 
-                        # PUNC 处理
+                        if not text:
+                            #如果未返回文本. 则跳过
+                            continue
+
+                        # 拼接上一次语别留下的不完整行尾作行首.
+                        log(f"拼接前: text: '{text}', force_ended='{force_ended}'")
+                        text = self._text_processor.getHeader() + text
+                        self._text_processor.clear_header()
+                        log(f"拼接后: text: '{text}', force_ended='{force_ended}'")
+
+                        # 拼接完成后, 进行punc处理, 更新标点
                         punctuated = await loop.run_in_executor(
                             self._executor,
                             self._punc_process,
                             text
                         )
 
-                        if punctuated:
-                            # TextProcessor 预处理
-                            current_time = time.time()
-                            cleaned = self._text_processor.preprocess(punctuated)
-                            # 添加到累积缓冲区
-                            self._text_processor.append(cleaned)
-                            # 检查是否需要输出
-                            output_text, status = self._text_processor.tick(current_time)
-                            if output_text:
-                                output = self._build_output(output_text, status, current_time)
-                                log(f"  PUNC out({status}): {repr(output_text[:80])}")
-                                await self._send_output(output)
+                        log(f"更新标点后: text: '{punctuated}', force_ended='{force_ended}'")
+                        current_time = time.time()
+
+                        # 分割句子中的最后一句(最后两个标点间的内容), 作为下一句的行首, 确保语义完整.
+                        if force_ended:
+                            punctuated, status = self._text_processor.append_truncated(punctuated, current_time)
+                            log(f"分割句子行尾做header后: punctuated: '{punctuated}', handler: '{self._text_processor.getHeader()}', status='{status}'")
+
+                        # TextProcessor 清理以及整理字串的错误字符, 格式等.
+                        cleaned = self._text_processor.preprocess(punctuated)
+
+                        # 检查是否需要换行
+                        output_text, status = self._text_processor.tick(cleaned, current_time)
+                        log(f"预备输出: output_text: '{output_text}', status='{status}'")
+
+                        if output_text:
+                            # 检查是否需要添加行首, 是否需要换行
+                            output = self._build_output(output_text, status, current_time)
+                            log(f"  PUNC out({status}): {repr(output_text[:80])}, output: '{output}'")
+                            await self._send_output(output)
 
                 except asyncio.TimeoutError:
                     pass
@@ -518,7 +533,7 @@ class ModelServer:
                 log(f"Punc worker error: {e}")
 
     async def _text_processor_timer(self):
-        """TextProcessor 定时器 - 每3秒检查输出"""
+        """TextProcessor 定时器 - 每3秒强制检查输出"""
         log("TEXT_PROCESSOR_TIMER: started")
         TEXT_CHECK_INTERVAL = 3.0
 
@@ -527,7 +542,8 @@ class ModelServer:
                 await asyncio.sleep(TEXT_CHECK_INTERVAL)
 
                 current_time = time.time()
-                output_text, status = self._text_processor.tick(current_time)
+                # 仅做强制输出，不参与正常条件判断
+                output_text, status = self._text_processor.tick_force(current_time)
 
                 if output_text:
                     output = self._build_output(output_text, status, current_time)
@@ -557,7 +573,7 @@ class ModelServer:
             current_time: 当前时间戳
 
         Returns:
-            - "newline": \n + 时间头 + 文本 + \n
+            - "newline": \n + 时间头 + 文本
             - "continuous": 文本（无时间头，无换行）
         """
         import time as time_module
@@ -565,9 +581,14 @@ class ModelServer:
         if not text:
             return ""
 
+        log(f"_build_output, 准备为下一行换行做冷血 status: '{status}', text:'{text}', is_first={self._is_first_line}")
         if status == "newline":
             time_header = time_module.strftime("[%H:%M:%S]", time_module.localtime(current_time))
-            return f"\n{time_header} {text}\n"
+            if self._is_first_line:
+                self._is_first_line = False
+                return f"{time_header} {text}"  # 首行：时间头在前
+            else:
+                return f"{text}\n{time_header} "  # 后续行：时间头在上一行末尾
         else:
             # continuous: 不加时间头，不加换行
             return text
