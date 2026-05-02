@@ -363,27 +363,19 @@ class TranscribeServerV3:
         self._asr_queue = asyncio.Queue(maxsize=self._asr_queue_size)
         self._punc_queue = asyncio.Queue(maxsize=self._punc_queue_size)
 
-        # 立即启动 Socket 监听（不等待模型加载）
+        # 先启动 Socket 监听，如果端口被占用则立即退出（不加载模型）
+        log("Checking port availability...")
+        server = await self._socket_server()  # 如果端口被占用，这里会 sys.exit(1)
+
+        # 端口绑定成功，启动服务器任务
         self._tasks = [
-            asyncio.create_task(self._socket_server()),
+            asyncio.create_task(self._server_forever(server)),
         ]
-        log(f"Server listening on {self.config['server']['host']}:{self.config['server']['port']}")
 
         # 在后台加载模型
         asyncio.create_task(self._load_models_async())
 
         try:
-            # 等待所有任务
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            log(f"Server error: {e}")
-        finally:
-            await self.shutdown()
-
-        try:
-            # 等待所有任务
             await asyncio.gather(*self._tasks, return_exceptions=True)
         except asyncio.CancelledError:
             pass
@@ -420,14 +412,32 @@ class TranscribeServerV3:
         log("Server stopped")
 
     async def _socket_server(self):
-        """Socket 服务器 (异步)"""
-        server = await asyncio.start_server(
-            self._handle_client,
-            self.config["server"]["host"],
-            self.config["server"]["port"],
-            reuse_address=True,
-        )
+        """Socket 服务器 (异步) - 尝试绑定端口，失败则退出"""
+        host = self.config["server"]["host"]
+        port = self.config["server"]["port"]
 
+        try:
+            server = await asyncio.start_server(
+                self._handle_client,
+                host,
+                port,
+            )
+        except OSError as e:
+            # Windows: errno 10048 = Address already in use
+            # Linux: errno 98 = Address already in use
+            if e.errno in (10048, 98):
+                log(f"ERROR: Port {port} is already in use")
+                log("Another instance may be running - exiting immediately without loading models")
+                self._running = False
+                import sys
+                sys.exit(1)
+            raise
+
+        log(f"Server listening on {host}:{port}")
+        return server
+
+    async def _server_forever(self, server):
+        """保持服务器运行直到 shutdown"""
         async with server:
             await server.serve_forever()
 
