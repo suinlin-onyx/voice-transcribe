@@ -13,8 +13,6 @@ import re
 
 # 设置模型缓存目录
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_CACHE_DIR = os.path.join(SCRIPT_DIR, "models")
-os.environ['MODELSCOPE_CACHE'] = MODEL_CACHE_DIR
 os.environ['MODELSCOPE_VERBOSE'] = '0'
 os.environ['FUNASR_VERBOSE'] = '0'
 
@@ -26,6 +24,7 @@ for logger_name in ['modelscope', 'funasr', 'root', 'torch']:
 # 添加路径并导入 logger
 sys.path.insert(0, SCRIPT_DIR)
 from logger import get_logger
+from processors._model_path import resolve_model_path
 
 logger = get_logger(__name__, "SERVER")
 
@@ -53,8 +52,10 @@ class TranscriptionServer:
             logger.info("Loading ASR model...")
             try:
                 from funasr import AutoModel
+                asr_model_path = resolve_model_path("iic/SenseVoiceSmall")
+                logger.info(f"ASR model path: {asr_model_path}")
                 self.asr_model = AutoModel(
-                    model="iic/SenseVoiceSmall",
+                    model=asr_model_path,
                     disable_update=True,
                     ncpu=4,
                 )
@@ -67,8 +68,10 @@ class TranscriptionServer:
             logger.info("Loading punctuation model...")
             try:
                 from funasr import AutoModel
+                punc_model_path = resolve_model_path("ct-punc")
+                logger.info(f"Punc model path: {punc_model_path}")
                 self.punc_model = AutoModel(
-                    model="ct-punc",
+                    model=punc_model_path,
                     model_revision="v2.0.4",
                     disable_update=True,
                     ncpu=4,

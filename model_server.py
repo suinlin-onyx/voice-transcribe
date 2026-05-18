@@ -46,7 +46,7 @@ log_debug = logger.debug
 log_error = logger.error
 
 # 环境设置
-os.environ['MODELSCOPE_CACHE'] = os.path.join(SCRIPT_DIR, "models")
+os.environ['MODELSCOPE_CACHE'] = "D:/arvin/obsidian_workpace/models"
 os.environ['MODELSCOPE_VERBOSE'] = '0'
 
 import logging as third_party_log

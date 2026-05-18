@@ -12,8 +12,8 @@ import threading
 
 # 设置模型缓存目录
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_CACHE_DIR = os.path.join(SCRIPT_DIR, "models")
-os.environ.setdefault("MODELSCOPE_CACHE", MODEL_CACHE_DIR)
+sys.path.insert(0, SCRIPT_DIR)
+from processors._model_path import resolve_model_path
 
 # 静默模式 - 禁用所有日志
 import logging
@@ -41,8 +41,10 @@ def main():
     from funasr import AutoModel
 
     # 加载模型
+    model_path = resolve_model_path("iic/SenseVoiceSmall")
+    print(f"Using model: {model_path}")
     model = AutoModel(
-        model="iic/SenseVoiceSmall",
+        model=model_path,
         disable_update=True,
         ncpu=4,
     )

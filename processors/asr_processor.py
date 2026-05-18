@@ -12,6 +12,7 @@ from typing import List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from interfaces import IASRProcessor, TextResult, SpeechSegment
 from logger import get_logger
+from processors._model_path import resolve_model_path
 
 logger = get_logger(__name__, "ASR")
 
@@ -29,10 +30,11 @@ class SenseVoiceASR(IASRProcessor):
     def load_model(self) -> None:
         """加载模型"""
         if self.model is None:
-            logger.info(f"Loading model: {self.model_name}")
+            model_path = resolve_model_path(self.model_name)
+            logger.info(f"Loading model: {model_path}")
             from funasr import AutoModel
             self.model = AutoModel(
-                model=self.model_name,
+                model=model_path,
                 disable_update=True,
                 ncpu=4,
             )
@@ -132,10 +134,11 @@ class ParaformerASR(IASRProcessor):
 
     def load_model(self) -> None:
         if self.model is None:
-            logger.info(f"Loading model: {self.model_name}")
+            model_path = resolve_model_path(self.model_name)
+            logger.info(f"Loading model: {model_path}")
             from funasr import AutoModel
             self.model = AutoModel(
-                model=self.model_name,
+                model=model_path,
                 disable_update=True,
                 ncpu=4,
             )

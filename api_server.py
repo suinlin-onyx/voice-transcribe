@@ -22,6 +22,7 @@ LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(LOG_DIR, f"api_server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+TRANSCRIPT_LOG_FILE = os.path.join(LOG_DIR, f"transcript_{datetime.now().strftime('%Y%m%d')}.log")
 
 logger = logging.getLogger("api_server")
 logger.setLevel(logging.DEBUG)
@@ -108,12 +109,16 @@ class APIServer:
 
     async def _on_text_output(self, text: str):
         """文本输出回调 - 广播到所有 WebSocket 客户端"""
+        log(f">>> TX: {repr(text)}")
+        # 透传日志 - 输出到 api_server 日志
+        with open(TRANSCRIPT_LOG_FILE, "a", encoding="utf-8") as f: f.write(text)
+
         await self._broadcast({
             "id": gen_id(),
             "type": "transcription",
             "status": "recognizing",
             "payload": {
-                "text": text.strip(),
+                "text": text,
                 "isFinal": True,
                 "timestamp": now_ms()
             },

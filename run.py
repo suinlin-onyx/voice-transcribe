@@ -10,7 +10,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
 # 设置环境变量
-os.environ['MODELSCOPE_CACHE'] = os.path.join(SCRIPT_DIR, "models")
+os.environ['MODELSCOPE_CACHE'] = "D:/arvin/obsidian_workpace/models"
 os.environ['MODELSCOPE_VERBOSE'] = '0'
 
 import logging
@@ -82,7 +82,7 @@ def main():
             from model_server import ModelServer
 
             model_server = ModelServer()
-            api_server = APIServer(host="127.0.0.1", port=9876)
+            api_server = APIServer(host="127.0.0.1", port=9886)
             api_server.set_model_server(model_server)
 
             tasks = [
@@ -93,8 +93,8 @@ def main():
             print("=" * 50)
             print("FunASR Transcription Server v4.0 (三层分离架构)")
             print("=" * 50)
-            print("WebSocket: ws://127.0.0.1:9876")
-            print("HTTP:     http://127.0.0.1:9877")
+            print("WebSocket: ws://127.0.0.1:9886")
+            print("HTTP:     http://127.0.0.1:9887")
             print("等待模型加载...")
 
             try:

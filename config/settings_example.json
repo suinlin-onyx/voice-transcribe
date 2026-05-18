@@ -1,0 +1,39 @@
+{
+  // ==================== VAD 参数 ====================
+  "vad": {
+    "enabled": true,                      // 是否启用 VAD
+    "mode": "sensevoice",                // VAD 模式: sensevoice | fsmn_vad | simple
+    "threshold": 0.5,                    // 语音检测阈值 (0.0-1.0)
+    "min_speech_duration": 0.3,          // 最小语音时长(秒)，低于此值被认为是噪音
+    "max_speech_duration": 5.0,          // 最大语音时长(秒)，超过此值强制截断输出
+    "silence_timeout": 1.0,              // 静默超时(秒)，超过此时间无语音则判定语音结束
+    "pre_roll_duration": 0.15,          // 前导缓冲(秒)，语音开头额外包含的音频
+    "post_roll_duration": 0.2            // 后导缓冲(秒)，语音结尾额外包含的音频
+  },
+
+  // ==================== TextProcessor 参数 ====================
+  "text_processor": {
+    // 用于判断是否该换行的标点（不含逗号）
+    // 句号、问号、叹号表示句子结束，需要换行
+    "punctuation": "。！？.!?",
+
+    // 用于截断文本分割的标点（包含逗号）
+    // 当 force_ended=True 时，按此标点找到倒数第2个位置进行分割
+    "split_punctuation": "，。！？.!?",
+
+    // 静默阈值(秒)
+    // 当停顿时间 >= 此值 且 有换行标点 → 输出并换行(newline)
+    // 当停顿时间 < 此值 且 有换行标点 → 输出但不换行(continuous)
+    "silence_threshold": 1,
+
+    // 最大累积时间(秒) - 已废弃，当前版本不再使用此参数
+    "max_accumulate": 6.0,
+
+    // 检测间隔(秒) - 已废弃，当前版本不再使用此参数
+    "check_interval": 3.0,
+
+    // 去重窗口(秒)
+    // 同一文本在此时长内重复出现会被过滤
+    "dedup_window": 5.0
+  }
+}

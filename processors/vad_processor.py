@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from interfaces import IVADProcessor, SpeechSegment
 from logger import get_logger
+from processors._model_path import resolve_model_path
 
 logger = get_logger(__name__, "VAD")
 
@@ -29,13 +30,19 @@ class VADConfig:
     min_speech_duration: float = 0.3
 
     # 最大语音时长 (秒)
-    max_speech_duration: float = 5.0
+    max_speech_duration: float = 3.0
 
     # 静音超时 (秒) - 用于触发输出 (ASR需要约2s最小音频)
-    silence_timeout: float = 4.0
+    silence_timeout: float = 1.0
 
     # 采样率
     sample_rate: int = 16000
+
+    # 前导缓冲时长 (秒) - 语音开头额外包含的音频
+    pre_roll_duration: float = 0.15
+
+    # 后导缓冲时长 (秒) - 语音结尾额外包含的音频
+    post_roll_duration: float = 0.2
 
 
 class SenseVoiceVAD(IVADProcessor):
@@ -51,6 +58,15 @@ class SenseVoiceVAD(IVADProcessor):
         self._last_speech_sample = 0
         self._sample_rate = self.config.sample_rate
         self._total_samples_processed = 0
+
+        # Pre-roll: 历史缓冲区，用于存储最近收到的音频
+        self._history_buffer = np.array([], dtype=np.float32)
+        self._history_max_samples = int(self.config.pre_roll_duration * self._sample_rate)
+
+        # Post-roll: 后导缓冲状态
+        self._post_roll_waiting = False  # 是否处于后导缓冲等待状态
+        self._post_roll_speech_end_sample = 0  # 语音结束时的样本位置
+        self._post_roll_max_samples = int(self.config.post_roll_duration * self._sample_rate)
 
     def _is_valid_speech(self, text: str) -> bool:
         """检查是否是真的语音文本（而非特殊标记）"""
@@ -69,12 +85,25 @@ class SenseVoiceVAD(IVADProcessor):
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
 
-        # 添加到缓冲区
+        # 1. 先把音频加入历史缓冲区（用于 pre-roll）
+        self._history_buffer = np.concatenate([self._history_buffer, audio])
+        # 保持历史缓冲不超过 pre_roll_duration
+        if len(self._history_buffer) > self._history_max_samples:
+            self._history_buffer = self._history_buffer[-self._history_max_samples:]
+
+        # 2. 添加到主缓冲区
         self._buffer = np.concatenate([self._buffer, audio])
         self._sample_rate = getattr(self.asr_model, 'sample_rate', 16000)
 
+        # 3. Post-roll 等待状态处理
+        if self._post_roll_waiting:
+            samples_in_post_roll = self._total_samples_processed - self._post_roll_speech_end_sample
+            if samples_in_post_roll >= self._post_roll_max_samples:
+                # Post-roll 等待完成，输出 segment
+                self._flush_post_roll(segments)
+                self._post_roll_waiting = False
+
         min_samples = int(self.config.min_speech_duration * self._sample_rate)
-        max_samples = int(self.config.max_speech_duration * self._sample_rate)
 
         while len(self._buffer) >= min_samples:
             # 取一个chunk进行分析
@@ -93,6 +122,7 @@ class SenseVoiceVAD(IVADProcessor):
                 text = result[0].get("text", "").strip() if result else ""
 
                 if self._is_valid_speech(text):
+                    # 检测到语音活动
                     if not self._in_speech:
                         # 开始新语音
                         self._in_speech = True
@@ -101,48 +131,84 @@ class SenseVoiceVAD(IVADProcessor):
                         logger.debug(f"VAD: speech started, text='{text[:30]}'")
                     else:
                         self._speech_buffer = np.concatenate([self._speech_buffer, chunk])
-                        logger.debug(f"VAD: speech continued, buf={len(self._speech_buffer)/self._sample_rate:.2f}s")
 
                     self._last_speech_sample = self._total_samples_processed
 
-                    # 检查是否超时
+                    # 如果之前在 post-roll 等待，现在检测到语音了，取消等待
+                    if self._post_roll_waiting:
+                        self._post_roll_waiting = False
+
+                    # 检查是否超时（强制截断）
                     speech_dur = len(self._speech_buffer) / self._sample_rate
                     if speech_dur > self.config.max_speech_duration:
                         logger.debug(f"VAD: max duration reached, output {speech_dur:.2f}s")
-                        segment = SpeechSegment(
-                            audio=self._speech_buffer.copy(),
-                            start_time=0,
-                            end_time=speech_dur,
-                            is_final=True,
-                        )
-                        segments.append(segment)
-                        self._in_speech = False
-                        self._speech_buffer = np.array([], dtype=np.float32)
+                        self._output_segment(segments, force_ended=True)
+
+                else:
+                    # 检测到静音
+                    if self._in_speech:
+                        # 语音中断，进入 post-roll 等待
+                        self._post_roll_waiting = True
+                        self._post_roll_speech_end_sample = self._total_samples_processed
 
             except Exception as e:
                 logger.error(f"VAD processing error: {e}")
 
         # 检查静音超时 - 基于音频位置而非时间
-        if self._in_speech and self._last_speech_sample > 0:
+        if self._in_speech and self._last_speech_sample > 0 and not self._post_roll_waiting:
             samples_since_last_speech = self._total_samples_processed - self._last_speech_sample
             silence_dur_samples = samples_since_last_speech
             silence_dur_sec = silence_dur_samples / self._sample_rate
 
             if silence_dur_sec > self.config.silence_timeout:
-                speech_dur = len(self._speech_buffer) / self._sample_rate
-                logger.debug(f"VAD: silence timeout ({silence_dur_sec:.2f}s), output {speech_dur:.2f}s")
-                if speech_dur >= self.config.min_speech_duration:
-                    segment = SpeechSegment(
-                        audio=self._speech_buffer.copy(),
-                        start_time=0,
-                        end_time=speech_dur,
-                        is_final=True,
-                    )
-                    segments.append(segment)
-                self._in_speech = False
-                self._speech_buffer = np.array([], dtype=np.float32)
+                # 进入 post-roll 等待
+                self._post_roll_waiting = True
+                self._post_roll_speech_end_sample = self._total_samples_processed
+                # 立即检查是否已经满足 post-roll 时长
+                if self._post_roll_waiting:
+                    samples_in_post_roll = 0
+                    if samples_in_post_roll >= self._post_roll_max_samples:
+                        self._flush_post_roll(segments)
+                        self._post_roll_waiting = False
 
         return segments
+
+    def _output_segment(self, segments: List[SpeechSegment], force_ended: bool = False) -> None:
+        """输出一个 segment（带 pre-roll）"""
+        # 获取 pre-roll 音频
+        pre_roll_samples = min(self._history_max_samples, len(self._history_buffer))
+        pre_roll_audio = self._history_buffer[-pre_roll_samples:] if pre_roll_samples > 0 else np.array([], dtype=np.float32)
+
+        # 组合: pre_roll + speech_buffer
+        segment_audio = np.concatenate([pre_roll_audio, self._speech_buffer])
+        speech_dur = len(self._speech_buffer) / self._sample_rate
+        total_dur = len(segment_audio) / self._sample_rate
+
+        logger.debug(f"VAD: output segment {total_dur:.2f}s (pre_roll={pre_roll_samples/self._sample_rate:.2f}s)")
+
+        segment = SpeechSegment(
+            audio=segment_audio,
+            start_time=0,
+            end_time=total_dur,
+            is_final=True,
+            force_ended=force_ended,
+        )
+        segments.append(segment)
+
+        # 消费了历史缓冲区中已使用的部分
+        # 保留超出 pre_roll 的历史数据（如果有的话）
+        if len(self._history_buffer) > pre_roll_samples:
+            self._history_buffer = self._history_buffer[-pre_roll_samples:]
+        else:
+            self._history_buffer = np.array([], dtype=np.float32)
+
+        self._in_speech = False
+        self._speech_buffer = np.array([], dtype=np.float32)
+
+    def _flush_post_roll(self, segments: List[SpeechSegment]) -> None:
+        """Post-roll 等待结束后，输出 segment"""
+        if len(self._speech_buffer) > 0:
+            self._output_segment(segments, force_ended=False)
 
     def reset(self) -> None:
         self._buffer = np.array([], dtype=np.float32)
@@ -151,6 +217,13 @@ class SenseVoiceVAD(IVADProcessor):
         self._speech_start_sample = 0
         self._last_speech_sample = 0
         self._total_samples_processed = 0
+
+        # Pre-roll 历史缓冲区
+        self._history_buffer = np.array([], dtype=np.float32)
+
+        # Post-roll 状态
+        self._post_roll_waiting = False
+        self._post_roll_speech_end_sample = 0
 
 
 class FSMNVAD(IVADProcessor):
@@ -167,8 +240,10 @@ class FSMNVAD(IVADProcessor):
         """加载 VAD 模型"""
         if self._vad_model is None:
             from funasr import AutoModel
+            vad_model_path = resolve_model_path("iic/speech_fsmn_vad_zh-cn-16k-common-pytorch")
+            logger.info(f"Loading FSMN-VAD model: {vad_model_path}")
             self._vad_model = AutoModel(
-                model="fsmn-vad",
+                model=vad_model_path,
                 disable_update=True,
                 ncpu=4,
             )

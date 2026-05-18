@@ -30,6 +30,7 @@ class SpeechSegment:
     start_time: float
     end_time: float
     is_final: bool = False
+    force_ended: bool = False  # True=被截断，False=自然结束
 
 
 @dataclass

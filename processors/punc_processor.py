@@ -8,6 +8,7 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from interfaces import IPuncProcessor, PunctuatedText
 from logger import get_logger
+from processors._model_path import resolve_model_path
 
 logger = get_logger(__name__, "PUNC")
 
@@ -23,10 +24,11 @@ class CtPuncProcessor(IPuncProcessor):
     def load_model(self) -> None:
         """加载标点模型"""
         if self.model is None:
-            logger.info(f"Loading punctuation model: {self.model_name}...")
+            model_path = resolve_model_path(self.model_name)
+            logger.info(f"Loading punctuation model: {model_path}...")
             from funasr import AutoModel
             self.model = AutoModel(
-                model=self.model_name,
+                model=model_path,
                 model_revision=self.revision,
                 disable_update=True,
                 ncpu=4,

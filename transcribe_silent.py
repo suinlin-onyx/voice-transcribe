@@ -11,8 +11,8 @@ import re
 
 # 设置模型缓存目录
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_CACHE_DIR = os.path.join(SCRIPT_DIR, "models")
-os.environ['MODELSCOPE_CACHE'] = MODEL_CACHE_DIR
+sys.path.insert(0, SCRIPT_DIR)
+from processors._model_path import resolve_model_path
 os.environ['MODELSCOPE_VERBOSE'] = '0'
 os.environ['FUNASR_VERBOSE'] = '0'
 
@@ -40,11 +40,17 @@ def main():
     from funasr import AutoModel
 
     print("Loading model...", file=sys.__stderr__)
+    asr_model_path = resolve_model_path("iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8405-pytorch")
+    vad_model_path = resolve_model_path("iic/speech_fsmn_vad_zh-cn-16k-common-pytorch")
+    punc_model_path = resolve_model_path("ct-punc")
+    print(f"ASR: {asr_model_path}", file=sys.__stderr__)
+    print(f"VAD: {vad_model_path}", file=sys.__stderr__)
+    print(f"PUNC: {punc_model_path}", file=sys.__stderr__)
     model = AutoModel(
-        model="iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8405-pytorch",
-        vad_model="fsmn-vad",
+        model=asr_model_path,
+        vad_model=vad_model_path if os.path.exists(vad_model_path) else "fsmn-vad",
         vad_model_revision="v2.0.4",
-        punc_model="ct-punc",
+        punc_model=punc_model_path if os.path.exists(punc_model_path) else "ct-punc",
         punc_model_revision="v2.0.4",
         disable_update=True,
         ncpu=4,
