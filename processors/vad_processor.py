@@ -121,6 +121,14 @@ class SenseVoiceVAD(IVADProcessor):
 
                 text = result[0].get("text", "").strip() if result else ""
 
+                # Debug: log raw VAD output for first 10 chunks
+                if not hasattr(self, '_vad_debug_count'):
+                    self._vad_debug_count = 0
+                if self._vad_debug_count < 10:
+                    self._vad_debug_count += 1
+                    rms = float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2)))
+                    logger.info(f"VAD debug #{self._vad_debug_count}: rms={rms:.6f}, text={repr(text[:50])}")
+
                 if self._is_valid_speech(text):
                     # 检测到语音活动
                     if not self._in_speech:

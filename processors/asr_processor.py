@@ -71,6 +71,49 @@ class SenseVoiceASR(IASRProcessor):
 
         return TextResult(text="", timestamp=segment.start_time)
 
+    # 合法的叠词/拟声词白名单（折叠时保留3个）
+    _LEGITIMATE_REPEATS = {
+        '哈', '呵', '嘿', '嘻',  # 笑声
+        '咚', '啪', '哗', '嗖', '砰', '嘀', '嗡',  # 拟声词
+    }
+
+    def _collapse_repeats(self, text: str) -> str:
+        """折叠连续重复的中文字符（≥3次 → 最多2次）
+
+        "皮皮皮" → "皮皮"
+        "这这这这这" → "这这"
+        "看看" → "看看" (保留2个及以下的重复)
+        "哈哈哈" → "哈哈哈" (拟声词保留3个)
+        """
+        if not text:
+            return text
+
+        result = []
+        i = 0
+        while i < len(text):
+            char = text[i]
+            if '一' <= char <= '鿿':
+                # 统计连续重复次数
+                j = i + 1
+                while j < len(text) and text[j] == char:
+                    j += 1
+                repeat_count = j - i
+
+                if repeat_count >= 3:
+                    if char in self._LEGITIMATE_REPEATS:
+                        # 拟声词白名单：最多保留3个
+                        result.append(char * 3)
+                    else:
+                        # 非拟声词：最多保留2个
+                        result.append(char * 2)
+                else:
+                    result.append(char * repeat_count)
+                i = j
+            else:
+                result.append(char)
+                i += 1
+        return ''.join(result)
+
     def filter_noise(self, text: str) -> str:
         """过滤非语音内容（键盘声、打字声等）"""
         if not text:
@@ -104,6 +147,9 @@ class SenseVoiceASR(IASRProcessor):
             letters = re.sub(r'[^a-zA-Z]', '', text)
             if len(letters) < 2:
                 return ""
+
+        # 折叠连续重复字符（ASR 口吃修复）
+        text = self._collapse_repeats(text)
 
         return text
 

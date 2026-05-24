@@ -91,7 +91,7 @@ class APIServer:
         self._server = None
         self._http_server = None
         self._ws_clients: Set[websockets.WebSocketServerProtocol] = set()
-        self._last_status = "idle"
+        self._last_status = ""  # Empty string to ensure first status is never dedup-suppressed
         self._heartbeat_timeout = 60  # 60秒无心跳断开
 
     def set_model_server(self, model_server):
@@ -185,6 +185,15 @@ class APIServer:
             while self._running:
                 try:
                     if self._model_server and self._model_server.get_status()["models_loaded"]:
+                        # Send model_loaded explicitly so plugin auto-start triggers
+                        await websocket.send(json.dumps({
+                            "id": gen_id(),
+                            "type": "state_update",
+                            "status": "model_loaded",
+                            "payload": {},
+                            "timestamp": now_ms()
+                        }))
+                        self._last_status = "model_loaded"
                         await self._send_status()
                         break
                     await asyncio.sleep(0.5)

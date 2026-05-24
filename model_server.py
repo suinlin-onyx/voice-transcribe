@@ -516,6 +516,9 @@ class ModelServer:
                         # TextProcessor 清理以及整理字串的错误字符, 格式等.
                         cleaned = self._text_processor.preprocess(punctuated)
 
+                        # 跨 segment 重叠去重（修复 VAD pre-roll 导致的文本重复）
+                        cleaned = self._text_processor.dedup_overlap(cleaned)
+
                         # 检查是否需要换行
                         output_text, status = self._text_processor.tick(cleaned, current_time)
                         log(f"预备输出: output_text: '{output_text}', status='{status}'")

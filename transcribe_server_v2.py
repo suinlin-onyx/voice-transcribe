@@ -93,7 +93,7 @@ class TranscribeServerV2:
                 "mode": "sensevoice",  # sensevoice | fsmn_vad | simple
                 "threshold": 0.5,
                 "min_speech_duration": 0.3,
-                "max_speech_duration": 30.0,
+                "max_speech_duration": 10.0,
                 "silence_timeout": 2.0,
             },
             "asr": {

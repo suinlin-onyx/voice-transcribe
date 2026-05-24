@@ -71,6 +71,12 @@ class TextProcessor:
         self._recent_outputs: dict[str, float] = {}
         self._DEDUP_WINDOW = dedup_window  # 去重窗口
 
+        # 跨 segment 重叠去重
+        self._prev_segment_tail = ""  # 上一个 ASR segment 的尾部文本
+        self._TAIL_WINDOW = 20  # 尾部窗口大小（字符）
+        self._HEAD_WINDOW = 20  # 头部窗口大小（字符）
+        self._MIN_OVERLAP = 2   # 最小重叠字符数
+
         # 标点符号 (从配置加载)
         self._punctuation = punctuation  # 用于换行判断
         self._split_punctuation = split_punctuation  # 用于截断分割
@@ -244,10 +250,59 @@ class TextProcessor:
         text = re.sub(r'(\d)\s*\.\s*(\d)', r'\1.\2', text)
         return text
 
+    def dedup_overlap(self, text: str) -> str:
+        """
+        跨 segment 重叠去重：检测新 segment 开头与上一个 segment 结尾的重叠
+
+        算法：
+        1. 取上一个 segment 的最后 TAIL_WINDOW 个字符
+        2. 取新 segment 的前 HEAD_WINDOW 个字符
+        3. 找尾部后缀与头部前缀的最长公共子串
+        4. 如果重叠 ≥ MIN_OVERLAP 个字符，从新 segment 切掉重叠部分
+
+        Example:
+            prev: "...翻面。去皮"
+            new:  "皮皮叮叮椒王一根..."
+            → 重叠 = "皮" (len=1, < MIN_OVERLAP, 不处理)
+
+            prev: "...去皮皮"
+            new:  "皮皮叮叮椒王..."
+            → 重叠 = "皮皮" (len=2, ≥ MIN_OVERLAP, 切掉)
+            → result: "叮叮椒王..."
+        """
+        if not text:
+            return text
+
+        if not self._prev_segment_tail:
+            # 第一个 segment，记录尾部后直接返回
+            self._prev_segment_tail = text[-self._TAIL_WINDOW:] if len(text) > self._TAIL_WINDOW else text
+            return text
+
+        tail = self._prev_segment_tail[-self._TAIL_WINDOW:]
+        head = text[:self._HEAD_WINDOW]
+
+        # 找最长重叠：tail 的后缀 匹配 head 的前缀
+        overlap_len = 0
+        max_check = min(len(tail), len(head))
+        for k in range(max_check, self._MIN_OVERLAP - 1, -1):
+            if tail[-k:] == head[:k]:
+                overlap_len = k
+                break
+
+        if overlap_len >= self._MIN_OVERLAP:
+            stripped = text[overlap_len:]
+            log(f"[TextProcessor] dedup_overlap: removed {overlap_len} char(s) '{text[:overlap_len]}' from segment head")
+            text = stripped
+
+        # 更新尾部
+        self._prev_segment_tail = text[-self._TAIL_WINDOW:] if len(text) > self._TAIL_WINDOW else text
+        return text
+
     def reload(self):
         """热重载配置"""
         self._buffer = ""
         self._header = ""
+        self._prev_segment_tail = ""  # 清空重叠去重状态
         self._last_speech_time = time.time()
         self._segment_count = 0
         self._recent_outputs = {}  # 清空去重历史
@@ -259,6 +314,7 @@ class TextProcessor:
         """重置内部状态"""
         self._buffer = ""
         self._header = ""
+        self._prev_segment_tail = ""  # 清空重叠去重状态
         self._last_speech_time = time.time()
         self._segment_count = 0
         self._recent_outputs = {}  # 清空去重历史
