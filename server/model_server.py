@@ -13,8 +13,8 @@ from typing import Optional
 from datetime import datetime
 
 # 日志配置
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(LOG_DIR, f"server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
@@ -33,7 +33,7 @@ file_handler.setLevel(logging.DEBUG)
 file_format = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 file_handler.setFormatter(file_format)
 
-console_handler = logging.StreamHandler(sys.stderr)
+console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 console_format = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
 console_handler.setFormatter(console_format)
@@ -58,7 +58,7 @@ from processors.vad_processor import VADConfig, create_vad_processor
 from processors.asr_processor import create_asr_processor
 from processors.punc_processor import create_punc_processor
 from processors.hotword_manager import HotwordManager
-from text_processor import TextProcessor
+from processors.text_processor import TextProcessor
 from config import load_config
 
 
@@ -161,6 +161,9 @@ class ModelServer:
         # 回调 (API Server 设置)
         self._on_text_output: Optional[callable] = None
 
+        # 终端状态显示
+        self._term_status = ""  # 当前终端状态，避免重复打印
+
         # 任务
         self._tasks: list = []
 
@@ -243,36 +246,37 @@ class ModelServer:
 
     async def load_models(self):
         """加载所有模型"""
-        # 初始化音频和热词管理器
         self._init_audio()
 
         self._load_start = time.time()
-        last_report = [0]
+        SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
-        async def progress_reporter():
-            while not self._models_loaded:
-                await asyncio.sleep(5)
-                elapsed = int(time.time() - self._load_start)
-                log(f"Still loading... ({elapsed}s elapsed)")
-
-        log("Loading models in background...")
+        def progress_line(step: str, done: bool = False):
+            """输出单行进度，\r 原地刷新"""
+            elapsed = int(time.time() - self._load_start)
+            if done:
+                print(f"\r  ✓ {step} ({elapsed}s)")
+            else:
+                i = int(time.time() * 10) % len(SPINNER)
+                print(f"\r  {SPINNER[i]} {step} ({elapsed}s)", end="", flush=True)
 
         loop = asyncio.get_event_loop()
-        reporter_task = asyncio.create_task(progress_reporter())
 
+        # 中断时也换行
         try:
-            # ASR
-            log("Loading ASR model...")
+            # ASR (步骤 1/2)
+            engine = self.config["asr"].get("engine", "funasr")
+            engine_label = "ONNX" if engine == "onnx" else "PyTorch"
+            progress_line(f"加载 ASR 模型 ({engine_label})...")
             self._asr = create_asr_processor(
                 self.config["asr"]["model"],
-                self.config["asr"]["device"]
+                self.config["asr"]["device"],
+                engine=engine,
             )
             await loop.run_in_executor(self._executor, self._asr.load_model)
-            asr_info = get_model_memory_info(self._asr.model)
-            log(f"ASR model loaded: {asr_info['params_count']:,} params, ~{asr_info['ram_mb']:.0f} MB RAM")
-            log_memory_usage("  After ASR:")
+            progress_line(f"ASR 模型就绪 ({engine_label})", done=True)
 
-            # VAD
+            # VAD (无耗时加载，跳过)
             vad_config = VADConfig(
                 mode=self.config["vad"]["mode"],
                 threshold=self.config["vad"]["threshold"],
@@ -280,44 +284,39 @@ class ModelServer:
                 max_speech_duration=self.config["vad"]["max_speech_duration"],
                 silence_timeout=self.config["vad"]["silence_timeout"],
             )
-            log(f"VAD config: {vad_config}")
             self._vad = create_vad_processor(
                 self.config["vad"]["mode"],
                 asr_model=self._asr.model,
                 config=vad_config
             )
 
-            # PUNC
-            log("Loading Punctuation model...")
+            # PUNC (步骤 2/2)
+            progress_line("加载标点模型...")
             self._punc = create_punc_processor(
                 self.config["punc"]["model"],
                 self.config["punc"]["enabled"]
             )
             await loop.run_in_executor(self._executor, self._punc.load_model)
-            log("Punctuation model loaded")
-            log_memory_usage("  After PUNC:")
+            progress_line("标点模型就绪", done=True)
 
             # 热词
             if self.config["hotwords"]["load_from_notes"]:
                 notes_path = self.config["hotwords"]["notes_path"]
                 if os.path.exists(notes_path):
-                    count = await loop.run_in_executor(
+                    progress_line("加载热词...")
+                    await loop.run_in_executor(
                         self._executor,
                         self._hotword_manager.load_from_investment_notes,
                         notes_path
                     )
-                    log(f"Loaded {count} hotwords")
-                    hotwords = self._hotword_manager.get_hotwords()
-                    self._asr.set_hotwords(hotwords)
+                    progress_line("热词就绪", done=True)
 
             self._models_loaded = True
-            reporter_task.cancel()
             total_time = int(time.time() - self._load_start)
-            log(f"All models loaded - ready for transcription (total: {total_time}s)")
-            log_memory_usage("  Total memory:")
+            print(f"\n  全部就绪 ({total_time}s)")
 
         except Exception as e:
-            reporter_task.cancel()
+            print()  # 换行，避免覆盖 spinner
             log(f"Model loading error: {e}")
             raise
 
@@ -390,8 +389,9 @@ class ModelServer:
 
     async def _audio_loop(self):
         """音频采集循环"""
-        log("AUDIO_LOOP: started")
         chunk_count = 0
+        silence_count = 0  # 连续静音计数
+        last_status = None
 
         while self._running:
             if self._transcribing and self._audio_source:
@@ -404,21 +404,27 @@ class ModelServer:
 
                     if chunk is not None and len(chunk.data) > 0:
                         chunk_count += 1
-                        if chunk_count % 100 == 0:
-                            log(f"AUDIO: got chunk #{chunk_count}, samples={len(chunk.data)}")
 
                         segments = self._vad.process(chunk.data)
 
                         if segments:
-                            log(f"AUDIO: VAD found {len(segments)} segments")
+                            if last_status != "speaking":
+                                print("🔊 语音中")
+                                last_status = "speaking"
+                            silence_count = 0
 
-                        for seg in segments:
-                            if self._asr_queue.full():
-                                try:
-                                    self._asr_queue.get_nowait()
-                                except asyncio.QueueEmpty:
-                                    pass
-                            await self._asr_queue.put(seg)
+                            for seg in segments:
+                                if self._asr_queue.full():
+                                    try:
+                                        self._asr_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        pass
+                                await self._asr_queue.put(seg)
+                        else:
+                            silence_count += 1
+                            if last_status == "speaking" and silence_count > 50:
+                                print("🔇 等待语音...")
+                                last_status = "silent"
 
                 except Exception as e:
                     log(f"Audio loop error: {e}")
@@ -600,7 +606,9 @@ class ModelServer:
         """发送文本输出 (通过回调)"""
         if text and self._on_text_output:
             try:
-                log(f">>> TX: {repr(text[:200])}")
+                # 去除时间头显示纯文本
+                display = text.replace("\n", " ").strip()
+                print(f"📝 {display}")
                 await self._on_text_output(text)
             except Exception as e:
                 log(f"Send output error: {e}")

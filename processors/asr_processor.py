@@ -283,8 +283,85 @@ class ParaformerASR(IASRProcessor):
         self._hotwords = hotwords
 
 
-def create_asr_processor(model_name: str, device: str = "cuda") -> IASRProcessor:
-    """工厂函数"""
+class ParaformerOnnxASR(ParaformerASR):
+    """Paraformer ONNX (via funasr_onnx) — CPU 推理，INT8 量化
+
+    使用已导出的 ONNX 模型目录（非 SEACO，无热词）。
+    """
+
+    def __init__(
+        self,
+        model_name: str = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx",
+        device_id: str = "-1",
+        quantize: bool = True,
+        intra_op_num_threads: int = 4,
+    ):
+        self.model_name = model_name
+        self.device_id = device_id
+        self.quantize = quantize
+        self.intra_op_num_threads = intra_op_num_threads
+        self.model = None
+        self._hotwords = []
+
+    def load_model(self) -> None:
+        if self.model is None:
+            from funasr_onnx import Paraformer
+
+            model_path = resolve_model_path(self.model_name)
+            logger.info(
+                f"Loading ONNX model: {model_path} "
+                f"(device={self.device_id}, quantize={self.quantize}, threads={self.intra_op_num_threads})"
+            )
+            self.model = Paraformer(
+                model_dir=model_path,
+                batch_size=1,
+                device_id=self.device_id,
+                quantize=self.quantize,
+                intra_op_num_threads=self.intra_op_num_threads,
+            )
+            logger.info("ONNX model loaded")
+
+    def recognize(self, segment: SpeechSegment) -> TextResult:
+        if self.model is None:
+            self.load_model()
+
+        try:
+            result = self.model(segment.audio)
+
+            if result:
+                item = result[0]
+                if isinstance(item, dict):
+                    preds = item.get("preds", "")
+                else:
+                    preds = str(item)
+                # ONNX Paraformer 返回 (text, tokens) 元组
+                if isinstance(preds, (tuple, list)):
+                    preds = str(preds[0]) if preds else ""
+                text = re.sub(r"<\|[^|]*\|>", "", str(preds)).strip()
+                text = self._filter_noise(text)
+                if text:
+                    return TextResult(text=text, timestamp=segment.start_time)
+
+        except Exception as e:
+            logger.error(f"ONNX recognition error: {e}")
+
+        return TextResult(text="", timestamp=segment.start_time)
+
+
+def create_asr_processor(
+    model_name: str, device: str = "cuda", engine: str = "funasr"
+) -> IASRProcessor:
+    """工厂函数
+
+    Args:
+        model_name: 模型 ID 或路径
+        device: PyTorch 设备 ("cuda" / "cpu")，仅 engine="funasr" 时生效
+        engine: "funasr" (PyTorch) 或 "onnx" (ONNX CPU)
+    """
+    if engine == "onnx":
+        device_id = "-1" if device == "cpu" else "0"
+        return ParaformerOnnxASR(model_name, device_id=device_id)
+
     if "sensevoice" in model_name.lower():
         return SenseVoiceASR(model_name, device)
     elif "paraformer" in model_name.lower():

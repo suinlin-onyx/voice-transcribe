@@ -22,4 +22,5 @@ venv/
 
 # Temp
 *.tmp
-.vt_test.log
+vt_test.log
+.funasr.pid

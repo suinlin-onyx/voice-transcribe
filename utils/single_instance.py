@@ -6,7 +6,7 @@ Windows: 使用 msvcrt 文件锁 (标准库)
 Unix/macOS: 使用 fcntl.flock 文件锁
 
 使用方式:
-    from single_instance import acquire_single_instance
+    from utils.single_instance import acquire_single_instance
 
     if not acquire_single_instance():
         sys.exit(1)

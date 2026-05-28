@@ -55,6 +55,49 @@ class CtPuncProcessor(IPuncProcessor):
         return PunctuatedText(text=text)
 
 
+class CtPuncOnnxProcessor(IPuncProcessor):
+    """ct-punc ONNX 标点模型 (CPU 推理)"""
+
+    def __init__(self, model_name: str = "ct-punc-onnx", device_id: str = "-1", quantize: bool = True):
+        self.model_name = model_name
+        self.device_id = device_id
+        self.quantize = quantize
+        self.model = None
+
+    def load_model(self) -> None:
+        if self.model is None:
+            from funasr_onnx import CT_Transformer
+
+            model_path = resolve_model_path(self.model_name)
+            logger.info(f"Loading ONNX punctuation model: {model_path}")
+            self.model = CT_Transformer(
+                model_dir=model_path,
+                batch_size=1,
+                device_id=self.device_id,
+                quantize=self.quantize,
+            )
+            logger.info("ONNX punctuation model loaded")
+
+    def punctuate(self, text: str) -> PunctuatedText:
+        if not text:
+            return PunctuatedText(text=text)
+
+        if self.model is None:
+            self.load_model()
+
+        try:
+            result = self.model(text)
+            if result:
+                # CT_Transformer.__call__ returns (text, punc_list)
+                punctuated = result[0] if isinstance(result, (tuple, list)) else str(result)
+                if punctuated:
+                    return PunctuatedText(text=punctuated)
+        except Exception as e:
+            logger.error(f"ONNX punctuation error: {e}")
+
+        return PunctuatedText(text=text)
+
+
 class NoOpPuncProcessor(IPuncProcessor):
     """无操作标点处理器"""
 
@@ -70,7 +113,9 @@ def create_punc_processor(model_name: str = "ct-punc", enabled: bool = True) -> 
     if not enabled:
         return NoOpPuncProcessor()
 
-    if model_name == "ct-punc":
+    if model_name == "ct-punc-onnx":
+        return CtPuncOnnxProcessor(model_name)
+    elif model_name == "ct-punc":
         return CtPuncProcessor(model_name)
     else:
         return CtPuncProcessor(model_name)

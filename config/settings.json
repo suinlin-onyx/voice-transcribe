@@ -1,0 +1,56 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9876
+  },
+  "audio": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "device": null
+  },
+  "vad": {
+    "enabled": true,
+    "mode": "fsmn_vad",
+    "threshold": 0.5,
+    "min_speech_duration": 0.3,
+    "max_speech_duration": 4.0,
+    "silence_timeout": 2.0
+  },
+  "asr": {
+    "model": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx",
+    "device": "cpu",
+    "engine": "onnx",
+    "hotwords_enabled": false
+  },
+  "punc": {
+    "enabled": true,
+    "model": "ct-punc-onnx"
+  },
+  "output": {
+    "batch_interval": 0.3,
+    "batch_size": 50,
+    "retry_count": 3
+  },
+  "hotwords": {
+    "load_from_notes": false,
+    "notes_path": "D:/arvin/obsidian_workpace/arvin-notes/00.raw/01.投资研究",
+    "hotwords_dir": "hotwords",
+    "save_path": "hotwords/extracted.txt"
+  },
+  "threading": {
+    "max_workers": 4
+  },
+  "queue": {
+    "asr_size": 20,
+    "punc_size": 50
+  },
+
+  "text_processor": {
+    "punctuation": "。！？.!?",
+    "split_punctuation": "，。！？.!?",
+    "silence_threshold": 2,
+    "max_accumulate": 6.0,
+    "check_interval": 3.0,
+    "dedup_window": 5.0
+  }
+}

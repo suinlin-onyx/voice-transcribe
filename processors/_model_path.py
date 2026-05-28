@@ -11,21 +11,14 @@ LOCAL_MODEL_ROOT = "D:/arvin/obsidian_workpace/models"
 # 如果本地路径不存在，resolve_model_path 会返回原始 ID，触发 FunASR 下载
 MODEL_PATH_MAP = {
     # ASR 模型
-    "iic/SenseVoiceSmall": "iic/SenseVoiceSmall",
     "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch": "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-    "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8405-pytorch": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8405-pytorch",
+    "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx",
     # VAD 模型
     "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-    # 标点模型 (本地可能不存在，会触发下载)
+    # 标点模型
     "iic/punc_ct-transformer_cn-en-common-vocab471067-large": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
     "ct-punc": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
-    # Paraformer 系列
-    "iic/paraformer-zh": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8405-pytorch",
-    "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8405-pytorch": "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8405-pytorch",
-    "iic/speech_paraformer-large-vad-punc_asr-cn-16k-common-vocab8405-pytorch": "iic/speech_paraformer-large-vad-punc_asr-cn-16k-common-vocab8405-pytorch",
-    "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
-    # damo 系列
-    "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx",
+    "ct-punc-onnx": "punc_damo/damo/punc_ct-transformer_cn-en-common-vocab471067-large-onnx",
 }
 
 

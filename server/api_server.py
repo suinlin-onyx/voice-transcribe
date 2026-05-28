@@ -17,8 +17,8 @@ from typing import Optional, Set
 import websockets
 
 # 日志配置
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(SCRIPT_DIR, "logs")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(LOG_DIR, f"api_server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
@@ -38,7 +38,7 @@ file_handler.setLevel(logging.DEBUG)
 file_format = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 file_handler.setFormatter(file_format)
 
-console_handler = logging.StreamHandler(sys.stderr)
+console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.INFO)
 console_format = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
 console_handler.setFormatter(console_format)

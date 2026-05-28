@@ -26,8 +26,8 @@ class VADConfig:
     max_speech_duration: float = 4.0
     silence_timeout: float = 2.0
     sample_rate: int = 16000
-    pre_roll_duration: float = 0.15
-    post_roll_duration: float = 0.2
+    pre_roll_duration: float = 0.1
+    post_roll_duration: float = 0.1
 
 
 class SenseVoiceVAD(IVADProcessor):
@@ -220,13 +220,11 @@ class SenseVoiceVAD(IVADProcessor):
 
 
 class FSMNVAD(IVADProcessor):
-    """独立 FSMN-VAD — 带语音状态机，合并连续语音段
+    """独立 FSMN-VAD — 离线窗口 + 状态机，合并连续语音段
 
-    与 SenseVoiceVAD 一致的状态机逻辑:
-    - 用 FSMN-VAD 模型检测每 1s 窗口的语音/静音
-    - 跟踪 in_speech 状态，累积 speech_buffer
-    - 静音 > silence_timeout(2s) 或 > max_speech_duration(4s) → 输出 segment
-    - pre-roll 0.15s / post-roll 0.2s
+    - 1s 离线窗口检测（无 cache/chunk_size，每次独立推理）
+    - 状态机逻辑与 SenseVoiceVAD 一致
+    - 合并连续语音段，避免微小片段导致的重复识别
     """
 
     def __init__(self, config: VADConfig = None):
@@ -237,7 +235,7 @@ class FSMNVAD(IVADProcessor):
         # 音频缓冲
         self._buffer = np.array([], dtype=np.float32)
 
-        # 语音状态跟踪（与 SenseVoiceVAD 一致）
+        # 语音状态跟踪
         self._in_speech = False
         self._speech_buffer = np.array([], dtype=np.float32)
         self._last_speech_sample = 0
@@ -262,7 +260,7 @@ class FSMNVAD(IVADProcessor):
                 disable_update=True,
                 ncpu=4,
             )
-            logger.info("FSMN-VAD model loaded")
+            logger.info("FSMN-VAD model loaded (offline mode, window=1s)")
 
     def process(self, audio: np.ndarray) -> List[SpeechSegment]:
         if self._vad_model is None:
@@ -278,15 +276,14 @@ class FSMNVAD(IVADProcessor):
         # Buffer audio
         self._buffer = np.concatenate([self._buffer, audio])
 
-        # Process in 1s windows
-        window_samps = self._sample_rate
+        # Process in 1s offline windows
+        window_samps = self._sample_rate  # 1 second
         while len(self._buffer) >= window_samps:
             chunk = self._buffer[:window_samps]
             self._buffer = self._buffer[window_samps:]
-            chunk_start_sample = self._total_samples
             self._total_samples += len(chunk)
 
-            # VAD classification on this 1s window
+            # Offline VAD classification
             has_speech = self._classify(chunk)
 
             if has_speech:
@@ -294,15 +291,12 @@ class FSMNVAD(IVADProcessor):
                     self._in_speech = True
                     self._speech_buffer = np.array([], dtype=np.float32)
 
-                # Accumulate audio
                 self._speech_buffer = np.concatenate([self._speech_buffer, chunk])
                 self._last_speech_sample = self._total_samples
 
-                # Cancel post-roll if speech resumes
                 if self._post_roll_waiting:
                     self._post_roll_waiting = False
 
-                # Max duration check
                 speech_dur = len(self._speech_buffer) / self._sample_rate
                 if speech_dur > self.config.max_speech_duration:
                     seg = self._emit(force_ended=True)
@@ -310,7 +304,6 @@ class FSMNVAD(IVADProcessor):
                         segments.append(seg)
 
             else:
-                # Silence — check if utterance should end
                 if self._in_speech:
                     silence_samps = self._total_samples - self._last_speech_sample
                     silence_sec = silence_samps / self._sample_rate
@@ -320,7 +313,6 @@ class FSMNVAD(IVADProcessor):
                             self._post_roll_waiting = True
                             self._post_roll_end_sample = self._total_samples
 
-                # Post-roll completion
                 if self._post_roll_waiting:
                     post_roll_samps = self._total_samples - self._post_roll_end_sample
                     if post_roll_samps >= self._post_roll_max:
@@ -332,9 +324,9 @@ class FSMNVAD(IVADProcessor):
         return segments
 
     def _classify(self, chunk: np.ndarray) -> bool:
-        """Run FSMN-VAD on a 1s window, return True if speech detected."""
+        """Run offline FSMN-VAD on a 1s window. Returns True if speech detected."""
         try:
-            result = self._vad_model.generate(input=chunk, batch_size_s=300)
+            result = self._vad_model.generate(input=chunk)
             if result and "value" in result[0]:
                 for vad_seg in result[0]["value"]:
                     dur_ms = vad_seg[1] - vad_seg[0]
