@@ -1,6 +1,6 @@
 """
 processors/vad_processor.py - VAD语音检测层
-支持 SenseVoice 内置VAD 和独立 FSMN-VAD
+支持 SenseVoice 内置VAD、FSMN-VAD、SimpleVAD
 """
 import sys
 import os
@@ -20,28 +20,13 @@ logger = get_logger(__name__, "VAD")
 @dataclass
 class VADConfig:
     """VAD配置"""
-    # 模式: sensevoice | fsmn_vad | simple
     mode: str = "sensevoice"
-
-    # 检测阈值
     threshold: float = 0.5
-
-    # 最小语音时长 (秒)
     min_speech_duration: float = 0.3
-
-    # 最大语音时长 (秒)
-    max_speech_duration: float = 3.0
-
-    # 静音超时 (秒) - 用于触发输出 (ASR需要约2s最小音频)
-    silence_timeout: float = 1.0
-
-    # 采样率
+    max_speech_duration: float = 4.0
+    silence_timeout: float = 2.0
     sample_rate: int = 16000
-
-    # 前导缓冲时长 (秒) - 语音开头额外包含的音频
     pre_roll_duration: float = 0.15
-
-    # 后导缓冲时长 (秒) - 语音结尾额外包含的音频
     post_roll_duration: float = 0.2
 
 
@@ -235,17 +220,39 @@ class SenseVoiceVAD(IVADProcessor):
 
 
 class FSMNVAD(IVADProcessor):
-    """独立 FSMN-VAD"""
+    """独立 FSMN-VAD — 带语音状态机，合并连续语音段
+
+    与 SenseVoiceVAD 一致的状态机逻辑:
+    - 用 FSMN-VAD 模型检测每 1s 窗口的语音/静音
+    - 跟踪 in_speech 状态，累积 speech_buffer
+    - 静音 > silence_timeout(2s) 或 > max_speech_duration(4s) → 输出 segment
+    - pre-roll 0.15s / post-roll 0.2s
+    """
 
     def __init__(self, config: VADConfig = None):
         self.config = config or VADConfig()
         self._vad_model = None
-        self._buffer = np.array([], dtype=np.float32)
-        self._speech_segments = []
         self._sample_rate = self.config.sample_rate
 
+        # 音频缓冲
+        self._buffer = np.array([], dtype=np.float32)
+
+        # 语音状态跟踪（与 SenseVoiceVAD 一致）
+        self._in_speech = False
+        self._speech_buffer = np.array([], dtype=np.float32)
+        self._last_speech_sample = 0
+        self._total_samples = 0
+
+        # Pre-roll 历史缓冲
+        self._history = np.array([], dtype=np.float32)
+        self._history_max = int(self.config.pre_roll_duration * self._sample_rate)
+
+        # Post-roll 等待
+        self._post_roll_waiting = False
+        self._post_roll_end_sample = 0
+        self._post_roll_max = int(self.config.post_roll_duration * self._sample_rate)
+
     def load_model(self):
-        """加载 VAD 模型"""
         if self._vad_model is None:
             from funasr import AutoModel
             vad_model_path = resolve_model_path("iic/speech_fsmn_vad_zh-cn-16k-common-pytorch")
@@ -261,45 +268,118 @@ class FSMNVAD(IVADProcessor):
         if self._vad_model is None:
             self.load_model()
 
-        self._buffer = np.concatenate([self._buffer, audio])
         segments = []
 
-        # 批量检测
-        if len(self._buffer) >= self._sample_rate:  # 至少1秒
-            try:
-                result = self._vad_model.generate(
-                    input=self._buffer,
-                    batch_size_s=300,
-                )
+        # Pre-roll history
+        self._history = np.concatenate([self._history, audio])
+        if len(self._history) > self._history_max:
+            self._history = self._history[-self._history_max:]
 
-                if result and "segments" in result[0]:
-                    for seg in result[0]["segments"]:
-                        if seg["offset"] + seg["duration"] <= len(self._buffer) / self._sample_rate:
-                            segment = SpeechSegment(
-                                audio=self._buffer[
-                                    int(seg["offset"] * self._sample_rate):
-                                    int((seg["offset"] + seg["duration"]) * self._sample_rate)
-                                ],
-                                start_time=seg["offset"],
-                                end_time=seg["offset"] + seg["duration"],
-                                is_final=True,
-                            )
-                            segments.append(segment)
+        # Buffer audio
+        self._buffer = np.concatenate([self._buffer, audio])
 
-                    # 保留未使用的音频
-                    if segments:
-                        last_seg = segments[-1]
-                        keep_start = int(last_seg.end_time * self._sample_rate)
-                        self._buffer = self._buffer[keep_start:]
+        # Process in 1s windows
+        window_samps = self._sample_rate
+        while len(self._buffer) >= window_samps:
+            chunk = self._buffer[:window_samps]
+            self._buffer = self._buffer[window_samps:]
+            chunk_start_sample = self._total_samples
+            self._total_samples += len(chunk)
 
-            except Exception as e:
-                logger.error(f"VAD processing error: {e}")
+            # VAD classification on this 1s window
+            has_speech = self._classify(chunk)
+
+            if has_speech:
+                if not self._in_speech:
+                    self._in_speech = True
+                    self._speech_buffer = np.array([], dtype=np.float32)
+
+                # Accumulate audio
+                self._speech_buffer = np.concatenate([self._speech_buffer, chunk])
+                self._last_speech_sample = self._total_samples
+
+                # Cancel post-roll if speech resumes
+                if self._post_roll_waiting:
+                    self._post_roll_waiting = False
+
+                # Max duration check
+                speech_dur = len(self._speech_buffer) / self._sample_rate
+                if speech_dur > self.config.max_speech_duration:
+                    seg = self._emit(force_ended=True)
+                    if seg:
+                        segments.append(seg)
+
+            else:
+                # Silence — check if utterance should end
+                if self._in_speech:
+                    silence_samps = self._total_samples - self._last_speech_sample
+                    silence_sec = silence_samps / self._sample_rate
+
+                    if silence_sec > self.config.silence_timeout:
+                        if not self._post_roll_waiting:
+                            self._post_roll_waiting = True
+                            self._post_roll_end_sample = self._total_samples
+
+                # Post-roll completion
+                if self._post_roll_waiting:
+                    post_roll_samps = self._total_samples - self._post_roll_end_sample
+                    if post_roll_samps >= self._post_roll_max:
+                        seg = self._emit(force_ended=False)
+                        if seg:
+                            segments.append(seg)
+                        self._post_roll_waiting = False
 
         return segments
 
+    def _classify(self, chunk: np.ndarray) -> bool:
+        """Run FSMN-VAD on a 1s window, return True if speech detected."""
+        try:
+            result = self._vad_model.generate(input=chunk, batch_size_s=300)
+            if result and "value" in result[0]:
+                for vad_seg in result[0]["value"]:
+                    dur_ms = vad_seg[1] - vad_seg[0]
+                    if dur_ms >= self.config.min_speech_duration * 1000:
+                        return True
+        except Exception as e:
+            logger.error(f"VAD classify error: {e}")
+        return False
+
+    def _emit(self, force_ended: bool) -> Optional[SpeechSegment]:
+        """输出累积的语音段"""
+        min_samps = int(self.config.min_speech_duration * self._sample_rate)
+        if len(self._speech_buffer) < min_samps:
+            self._speech_buffer = np.array([], dtype=np.float32)
+            self._in_speech = False
+            return None
+
+        # Pre-roll audio
+        pre_roll_samps = min(self._history_max, len(self._history))
+        pre_roll = self._history[-pre_roll_samps:] if pre_roll_samps > 0 else np.array([], dtype=np.float32)
+        audio_out = np.concatenate([pre_roll, self._speech_buffer])
+        dur = len(audio_out) / self._sample_rate
+
+        seg = SpeechSegment(
+            audio=audio_out,
+            start_time=0,
+            end_time=dur,
+            is_final=True,
+            force_ended=force_ended,
+        )
+
+        logger.debug(f"FSMN-VAD emit: {dur:.2f}s (force_ended={force_ended})")
+        self._speech_buffer = np.array([], dtype=np.float32)
+        self._in_speech = False
+        self._history = np.array([], dtype=np.float32)
+        return seg
+
     def reset(self) -> None:
         self._buffer = np.array([], dtype=np.float32)
-        self._speech_segments = []
+        self._speech_buffer = np.array([], dtype=np.float32)
+        self._in_speech = False
+        self._last_speech_sample = 0
+        self._total_samples = 0
+        self._history = np.array([], dtype=np.float32)
+        self._post_roll_waiting = False
 
 
 class SimpleVAD(IVADProcessor):

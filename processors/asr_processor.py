@@ -170,7 +170,13 @@ class SenseVoiceASR(IASRProcessor):
 
 
 class ParaformerASR(IASRProcessor):
-    """Paraformer 语音识别"""
+    """Paraformer 语音识别（含 SEACO 热词增强版）"""
+
+    # 合法的叠词/拟声词白名单（折叠时保留3个）
+    _LEGITIMATE_REPEATS = {
+        '哈', '呵', '嘿', '嘻',
+        '咚', '啪', '哗', '嗖', '砰', '嘀', '嗡',
+    }
 
     def __init__(self, model_name: str = "iic/paraformer-zh", device: str = "cuda"):
         self.model_name = model_name
@@ -202,12 +208,73 @@ class ParaformerASR(IASRProcessor):
 
             if result:
                 text = result[0].get("text", "")
-                return TextResult(text=text, timestamp=segment.start_time)
+                # Paraformer (especially SEACO) outputs space-separated characters
+                text = text.replace(" ", "")
+                # Strip special tokens
+                text = re.sub(r'<\|[^|]*\|>', '', text).strip()
+                # Filter noise and collapse repeats
+                text = self._filter_noise(text)
+                if text:
+                    return TextResult(text=text, timestamp=segment.start_time)
 
         except Exception as e:
             logger.error(f"Recognition error: {e}")
 
         return TextResult(text="", timestamp=segment.start_time)
+
+    def _collapse_repeats(self, text: str) -> str:
+        """折叠连续重复的中文字符（≥3次 → 最多2次）"""
+        if not text:
+            return text
+        result = []
+        i = 0
+        while i < len(text):
+            char = text[i]
+            if '一' <= char <= '鿿':
+                j = i + 1
+                while j < len(text) and text[j] == char:
+                    j += 1
+                repeat_count = j - i
+                if repeat_count >= 3:
+                    if char in self._LEGITIMATE_REPEATS:
+                        result.append(char * 3)
+                    else:
+                        result.append(char * 2)
+                else:
+                    result.append(char * repeat_count)
+                i = j
+            else:
+                result.append(char)
+                i += 1
+        return ''.join(result)
+
+    def _filter_noise(self, text: str) -> str:
+        """过滤非语音内容"""
+        if not text:
+            return ""
+        text = text.strip()
+        if not text:
+            return ""
+        # 纯标点
+        if re.match(r'^[\.\,\!\?\。\，\！\？\s]+$', text):
+            return ""
+        # 单字
+        if len(text) <= 1:
+            return ""
+        # 纯数字
+        if re.match(r'^[\d\s\.\,\-]+$', text):
+            return ""
+        # 短中文（<3字）
+        if re.match(r'^[一-鿿]+$', text) and len(text) < 3:
+            return ""
+        # 短英文（<2字母）
+        if re.match(r'^[a-zA-Z\s\.\,\!\?]+$', text):
+            letters = re.sub(r'[^a-zA-Z]', '', text)
+            if len(letters) < 2:
+                return ""
+        # 折叠重复字符
+        text = self._collapse_repeats(text)
+        return text
 
     def recognize_batch(self, segments: List[SpeechSegment]) -> List[TextResult]:
         return [self.recognize(seg) for seg in segments]
