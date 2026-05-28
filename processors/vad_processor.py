@@ -227,8 +227,9 @@ class FSMNVAD(IVADProcessor):
     - 合并连续语音段，避免微小片段导致的重复识别
     """
 
-    def __init__(self, config: VADConfig = None):
+    def __init__(self, config: VADConfig = None, model_path: str = ""):
         self.config = config or VADConfig()
+        self._model_path = model_path
         self._vad_model = None
         self._sample_rate = self.config.sample_rate
 
@@ -253,7 +254,7 @@ class FSMNVAD(IVADProcessor):
     def load_model(self):
         if self._vad_model is None:
             from funasr import AutoModel
-            vad_model_path = resolve_model_path("iic/speech_fsmn_vad_zh-cn-16k-common-pytorch")
+            vad_model_path = self._model_path or resolve_model_path("iic/speech_fsmn_vad_zh-cn-16k-common-pytorch")
             logger.info(f"Loading FSMN-VAD model: {vad_model_path}")
             self._vad_model = AutoModel(
                 model=vad_model_path,
@@ -449,12 +450,12 @@ class SimpleVAD(IVADProcessor):
         self._speech_frames = 0
 
 
-def create_vad_processor(mode: str, asr_model=None, config: VADConfig = None) -> IVADProcessor:
+def create_vad_processor(mode: str, asr_model=None, config: VADConfig = None, model_path: str = "") -> IVADProcessor:
     """工厂函数"""
     if mode == "sensevoice":
         return SenseVoiceVAD(asr_model, config)
     elif mode == "fsmn_vad":
-        return FSMNVAD(config)
+        return FSMNVAD(config, model_path=model_path)
     elif mode == "simple":
         return SimpleVAD(config)
     else:

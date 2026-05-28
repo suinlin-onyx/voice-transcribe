@@ -108,14 +108,12 @@ class NoOpPuncProcessor(IPuncProcessor):
         return PunctuatedText(text=text)
 
 
-def create_punc_processor(model_name: str = "ct-punc", enabled: bool = True) -> IPuncProcessor:
-    """工厂函数"""
+def create_punc_processor(model_path: str = "", enabled: bool = True) -> IPuncProcessor:
+    """工厂函数 — model_path 为绝对路径，根据路径判断 ONNX/PyTorch"""
     if not enabled:
         return NoOpPuncProcessor()
 
-    if model_name == "ct-punc-onnx":
-        return CtPuncOnnxProcessor(model_name)
-    elif model_name == "ct-punc":
-        return CtPuncProcessor(model_name)
+    if "onnx" in model_path.lower():
+        return CtPuncOnnxProcessor(model_path)
     else:
-        return CtPuncProcessor(model_name)
+        return CtPuncProcessor(model_path)

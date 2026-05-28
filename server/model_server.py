@@ -269,7 +269,7 @@ class ModelServer:
             engine_label = "ONNX" if engine == "onnx" else "PyTorch"
             progress_line(f"加载 ASR 模型 ({engine_label})...")
             self._asr = create_asr_processor(
-                self.config["asr"]["model"],
+                self.config["asr"]["model_path"],
                 self.config["asr"]["device"],
                 engine=engine,
             )
@@ -278,22 +278,25 @@ class ModelServer:
 
             # VAD (无耗时加载，跳过)
             vad_config = VADConfig(
-                mode=self.config["vad"]["mode"],
+                mode="fsmn_vad",
                 threshold=self.config["vad"]["threshold"],
                 min_speech_duration=self.config["vad"]["min_speech_duration"],
                 max_speech_duration=self.config["vad"]["max_speech_duration"],
                 silence_timeout=self.config["vad"]["silence_timeout"],
+                pre_roll_duration=self.config["vad"].get("pre_roll_duration", 0.1),
+                post_roll_duration=self.config["vad"].get("post_roll_duration", 0.1),
             )
             self._vad = create_vad_processor(
-                self.config["vad"]["mode"],
+                "fsmn_vad",
+                model_path=self.config["vad"].get("model_path", ""),
                 asr_model=self._asr.model,
-                config=vad_config
+                config=vad_config,
             )
 
             # PUNC (步骤 2/2)
             progress_line("加载标点模型...")
             self._punc = create_punc_processor(
-                self.config["punc"]["model"],
+                self.config["punc"]["model_path"],
                 self.config["punc"]["enabled"]
             )
             await loop.run_in_executor(self._executor, self._punc.load_model)
@@ -327,19 +330,21 @@ class ModelServer:
             return {"success": False, "message": f"Models still loading ({elapsed}s elapsed)"}
 
         self._transcribing = True
-        self._is_first_line = True  # 重置首行标志
+        self._is_first_line = True
+        if self._vad:
+            self._vad.reset()
         self._audio_source.start()
         return {"success": True, "message": "Transcription started"}
 
     def stop_transcribing(self):
         """停止转写"""
         self._transcribing = False
-        self._is_first_line = True  # 重置首行标志
+        self._is_first_line = True
 
         # 1. 停止音频采集
         self._audio_source.stop()
 
-        # 2. 清空各队列（不处理 pending 的音频）
+        # 2. 清空队列
         while not self._asr_queue.empty():
             try:
                 self._asr_queue.get_nowait()
@@ -351,7 +356,9 @@ class ModelServer:
             except asyncio.QueueEmpty:
                 break
 
-        # 3. 清空 TextProcessor buffer
+        # 3. 重置 VAD / TextProcessor，清除残留音频缓冲
+        if self._vad:
+            self._vad.reset()
         self._text_processor.reset()
 
         log("Transcription stopped and pipeline cleared")

@@ -1,45 +1,65 @@
 {
+  "models": {
+    "asr_seaco_gpu": "D:/arvin/obsidian_workpace/models/iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+    "asr_paraformer_onnx": "D:/arvin/obsidian_workpace/models/iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx",
+    "vad_fsmn_pytorch": "D:/arvin/obsidian_workpace/models/iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+    "vad_fsmn_onnx": "D:/arvin/obsidian_workpace/models/vad_damo/damo/speech_fsmn_vad_zh-cn-16k-common-onnx",
+    "punc_ct_pytorch": "D:/arvin/obsidian_workpace/models/iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+    "punc_ct_onnx": "D:/arvin/obsidian_workpace/models/punc_damo/damo/punc_ct-transformer_cn-en-common-vocab471067-large-onnx"
+  },
+
   "server": {
     "host": "127.0.0.1",
     "port": 9876
   },
+
   "audio": {
     "sample_rate": 16000,
     "channels": 1,
     "device": null
   },
+
+  "asr": {
+    "model": "asr_paraformer_onnx",
+    "engine": "onnx",
+    "device": "cpu",
+    "hotwords_enabled": false,
+    "intra_op_threads": 4
+  },
+
   "vad": {
+    "model": "vad_fsmn_pytorch",
     "enabled": true,
-    "mode": "fsmn_vad",
     "threshold": 0.5,
     "min_speech_duration": 0.3,
-    "max_speech_duration": 4.0,
-    "silence_timeout": 2.0
+    "max_speech_duration": 3.0,
+    "silence_timeout": 1.0,
+    "pre_roll_duration": 0.1,
+    "post_roll_duration": 0.1
   },
-  "asr": {
-    "model": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx",
-    "device": "cpu",
-    "engine": "onnx",
-    "hotwords_enabled": false
-  },
+
   "punc": {
-    "enabled": true,
-    "model": "ct-punc-onnx"
+    "model": "punc_ct_onnx",
+    "enabled": true
   },
+
   "output": {
     "batch_interval": 0.3,
     "batch_size": 50,
     "retry_count": 3
   },
+
   "hotwords": {
     "load_from_notes": false,
     "notes_path": "D:/arvin/obsidian_workpace/arvin-notes/00.raw/01.投资研究",
     "hotwords_dir": "hotwords",
     "save_path": "hotwords/extracted.txt"
   },
+
   "threading": {
     "max_workers": 4
   },
+
   "queue": {
     "asr_size": 20,
     "punc_size": 50
@@ -48,7 +68,7 @@
   "text_processor": {
     "punctuation": "。！？.!?",
     "split_punctuation": "，。！？.!?",
-    "silence_threshold": 2,
+    "silence_threshold": 1.5,
     "max_accumulate": 6.0,
     "check_interval": 3.0,
     "dedup_window": 5.0
