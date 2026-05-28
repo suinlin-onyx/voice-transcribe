@@ -180,17 +180,14 @@ class FileSource(IAudioSource):
         self._running = True
         data, sr = sf.read(self.file_path, dtype='float32')
 
-        # 转为单通道
         if data.ndim > 1:
             data = data[:, 0]
 
-        # 重采样
         if sr != self.sample_rate:
             import librosa
             data = librosa.resample(data, orig_sr=sr, target_sr=self.sample_rate)
 
-        # 分块发送
-        chunk_size = int(self.sample_rate * 0.1)  # 100ms
+        chunk_size = int(self.sample_rate * 0.1)
         total_chunks = len(data) // chunk_size
 
         def send_chunks():
@@ -205,9 +202,8 @@ class FileSource(IAudioSource):
                 )
                 for cb in self._callbacks:
                     cb(chunk)
-                time.sleep(0.1)  # 模拟实时
+                time.sleep(0.1)
 
-            # 发送结束信号
             for cb in self._callbacks:
                 cb(AudioChunk(data=np.array([]), sample_rate=self.sample_rate, timestamp=-1))
 
@@ -222,3 +218,146 @@ class FileSource(IAudioSource):
 
     def on_audio(self, callback):
         self._callbacks.append(callback)
+
+
+class LoopbackSource(IAudioSource):
+    """系统音频输出采集 (Windows WASAPI loopback)"""
+
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        channels: int = 2,
+        chunk_duration: float = 0.1,
+    ):
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.chunk_duration = chunk_duration
+        self.samples_per_chunk = int(sample_rate * chunk_duration)
+
+        self._stream = None
+        self._q = queue.Queue(maxsize=100)
+        self._running = False
+        self._callbacks = []
+        self._start_time = None
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        if self._running:
+            return
+
+        import sounddevice as sd
+
+        self._running = True
+        self._start_time = time.time()
+        self._q = queue.Queue(maxsize=100)
+
+        # 查找 WASAPI loopback 设备
+        loopback_device = self._find_loopback_device(sd)
+
+        def callback(indata, frames, time_info, status):
+            if status:
+                logger.warning(f"Loopback audio status: {status}")
+            if self._running:
+                # 多通道混为单声道
+                if indata.ndim > 1 and indata.shape[1] > 1:
+                    audio = indata.mean(axis=1)
+                else:
+                    audio = indata[:, 0] if indata.ndim > 1 else indata
+                chunk = AudioChunk(
+                    data=audio.astype(np.float32),
+                    sample_rate=self.sample_rate,
+                    timestamp=time.time() - self._start_time,
+                )
+                try:
+                    self._q.put_nowait(chunk)
+                except queue.Full:
+                    pass
+
+        try:
+            logger.info(f"Starting loopback capture (device={loopback_device})")
+            self._stream = sd.InputStream(
+                device=loopback_device,
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype='float32',
+                blocksize=self.samples_per_chunk,
+                callback=callback,
+            )
+            self._stream.start()
+        except Exception as e:
+            logger.error(f"Failed to start loopback stream: {e}")
+            self._running = False
+            raise
+
+        self._consumer_thread = threading.Thread(target=self._consume, daemon=True)
+        self._consumer_thread.start()
+
+    def _find_loopback_device(self, sd) -> int:
+        """查找 WASAPI loopback 设备"""
+        devices = sd.query_devices()
+        hostapis = sd.query_hostapis()
+
+        # 优先 WASAPI hostapi
+        for api_idx, api in enumerate(hostapis):
+            if "WASAPI" not in api["name"]:
+                continue
+
+            # 在 WASAPI 中查找 loopback 设备
+            for dev_idx in range(len(devices)):
+                dev = devices[dev_idx]
+                if dev["hostapi"] == api_idx:
+                    # WASAPI loopback 设备通常在名称中包含 "loopback"
+                    name = dev["name"].lower()
+                    if "loopback" in name and dev["max_input_channels"] > 0:
+                        logger.info(f"Found loopback device: {dev['name']} (id={dev_idx})")
+                        return dev_idx
+
+        # 回退：查找 Stereo Mix 或默认输出设备
+        for dev_idx, dev in enumerate(devices):
+            name = dev["name"].lower()
+            if ("stereo mix" in name or "wave out" in name) and dev["max_input_channels"] > 0:
+                logger.info(f"Found fallback device: {dev['name']} (id={dev_idx})")
+                return dev_idx
+
+        # 最终回退：尝试用 WASAPI 默认输出设备做 loopback
+        try:
+            default_output = sd.default.device[1]
+            if default_output is not None and default_output >= 0:
+                logger.info(f"Using default output device as loopback (id={default_output})")
+                return default_output
+        except Exception:
+            pass
+
+        raise RuntimeError(
+            "No loopback device found. Enable 'Stereo Mix' in Windows Sound settings or install a virtual audio device."
+        )
+
+    def _consume(self):
+        while self._running:
+            try:
+                chunk = self._q.get(timeout=0.1)
+                with self._lock:
+                    for cb in self._callbacks:
+                        try:
+                            cb(chunk)
+                        except Exception as e:
+                            logger.error(f"Callback error: {e}")
+            except queue.Empty:
+                continue
+
+    def stop(self) -> None:
+        self._running = False
+        if self._stream:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+
+    def is_active(self) -> bool:
+        return self._running
+
+    def on_audio(self, callback):
+        with self._lock:
+            self._callbacks.append(callback)

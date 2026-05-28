@@ -98,6 +98,7 @@ class APIServer:
         """设置 Model Server 引用"""
         self._model_server = model_server
         model_server.set_output_callback(self._on_text_output)
+        model_server.set_progress_callback(self._on_loading_progress)
 
     def _to_client_status(self, internal_status: dict) -> str:
         """内部状态转换为客户端协议状态"""
@@ -121,6 +122,20 @@ class APIServer:
                 "text": text,
                 "isFinal": True,
                 "timestamp": now_ms()
+            },
+            "timestamp": now_ms()
+        })
+
+    async def _on_loading_progress(self, step: str, message: str, elapsed: int):
+        """模型加载进度回调 - 广播 loading 状态到客户端"""
+        await self._broadcast({
+            "id": gen_id(),
+            "type": "state_update",
+            "status": "loading",
+            "payload": {
+                "step": step,
+                "message": message,
+                "elapsed": elapsed,
             },
             "timestamp": now_ms()
         })

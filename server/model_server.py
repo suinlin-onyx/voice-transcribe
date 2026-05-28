@@ -53,7 +53,7 @@ import logging as third_party_log
 for logger_name in ['modelscope', 'funasr', 'root', 'torch']:
     third_party_log.getLogger(logger_name).setLevel(logging.CRITICAL)
 
-from processors.audio_source import MicrophoneSource, MultiSource
+from processors.audio_source import MicrophoneSource, MultiSource, LoopbackSource
 from processors.vad_processor import VADConfig, create_vad_processor
 from processors.asr_processor import create_asr_processor
 from processors.punc_processor import create_punc_processor
@@ -160,6 +160,7 @@ class ModelServer:
 
         # 回调 (API Server 设置)
         self._on_text_output: Optional[callable] = None
+        self._on_progress: Optional[callable] = None
 
         # 终端状态显示
         self._term_status = ""  # 当前终端状态，避免重复打印
@@ -170,6 +171,10 @@ class ModelServer:
     def set_output_callback(self, callback: callable):
         """设置文本输出回调 (API Server 调用)"""
         self._on_text_output = callback
+
+    def set_progress_callback(self, callback: callable):
+        """设置加载进度回调 (API Server 调用)"""
+        self._on_progress = callback
 
     def start(self):
         """启动 Model Server"""
@@ -222,37 +227,49 @@ class ModelServer:
             except queue.Full:
                 pass
 
-        devices = self.config["audio"].get("devices")
-        if devices:
-            self._audio_source = MultiSource()
-            for device in devices:
-                source = MicrophoneSource(
-                    sample_rate=self.config["audio"]["sample_rate"],
-                    channels=self.config["audio"]["channels"],
-                    device=device,
-                )
-                self._audio_source.add_source(source)
-            log(f"Audio: MultiSource with {len(devices)} devices")
-        else:
-            self._audio_source = MicrophoneSource(
-                sample_rate=self.config["audio"]["sample_rate"],
-                channels=self.config["audio"]["channels"],
-                device=self.config["audio"]["device"],
+        source_type = self.config["audio"].get("source", "microphone")
+        sample_rate = self.config["audio"]["sample_rate"]
+        channels = self.config["audio"]["channels"]
+
+        if source_type == "loopback":
+            self._audio_source = LoopbackSource(
+                sample_rate=sample_rate,
+                channels=channels,
             )
-            log(f"Audio: MicrophoneSource (device={self.config['audio']['device']})")
+            log("Audio: LoopbackSource (system audio output)")
+        elif source_type == "microphone":
+            devices = self.config["audio"].get("devices")
+            if devices:
+                self._audio_source = MultiSource()
+                for device in devices:
+                    source = MicrophoneSource(
+                        sample_rate=sample_rate,
+                        channels=channels,
+                        device=device,
+                    )
+                    self._audio_source.add_source(source)
+                log(f"Audio: MultiSource with {len(devices)} devices")
+            else:
+                self._audio_source = MicrophoneSource(
+                    sample_rate=sample_rate,
+                    channels=channels,
+                    device=self.config["audio"]["device"],
+                )
+                log(f"Audio: MicrophoneSource (device={self.config['audio']['device']})")
+        else:
+            raise ValueError(f"Unknown audio source type: {source_type}")
 
         self._audio_source.on_audio(on_audio)
         self._hotword_manager = HotwordManager()
 
     async def load_models(self):
-        """加载所有模型"""
+        """加载所有模型，通过 _on_progress 回调推送进度"""
         self._init_audio()
 
         self._load_start = time.time()
         SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
         def progress_line(step: str, done: bool = False):
-            """输出单行进度，\r 原地刷新"""
             elapsed = int(time.time() - self._load_start)
             if done:
                 print(f"\r  ✓ {step} ({elapsed}s)")
@@ -260,14 +277,20 @@ class ModelServer:
                 i = int(time.time() * 10) % len(SPINNER)
                 print(f"\r  {SPINNER[i]} {step} ({elapsed}s)", end="", flush=True)
 
+        def push_progress(step: str, message: str):
+            """终端进度 + WS 推送"""
+            elapsed = int(time.time() - self._load_start)
+            progress_line(message)
+            if self._on_progress:
+                asyncio.ensure_future(self._on_progress(step, message, elapsed))
+
         loop = asyncio.get_event_loop()
 
-        # 中断时也换行
         try:
-            # ASR (步骤 1/2)
+            # ASR
             engine = self.config["asr"].get("engine", "funasr")
             engine_label = "ONNX" if engine == "onnx" else "PyTorch"
-            progress_line(f"加载 ASR 模型 ({engine_label})...")
+            push_progress("asr_loading", f"加载 ASR 模型 ({engine_label})...")
             self._asr = create_asr_processor(
                 self.config["asr"]["model_path"],
                 self.config["asr"]["device"],
@@ -276,10 +299,9 @@ class ModelServer:
             await loop.run_in_executor(self._executor, self._asr.load_model)
             progress_line(f"ASR 模型就绪 ({engine_label})", done=True)
 
-            # VAD (无耗时加载，跳过)
+            # VAD
             vad_config = VADConfig(
                 mode="fsmn_vad",
-                threshold=self.config["vad"]["threshold"],
                 min_speech_duration=self.config["vad"]["min_speech_duration"],
                 max_speech_duration=self.config["vad"]["max_speech_duration"],
                 silence_timeout=self.config["vad"]["silence_timeout"],
@@ -293,8 +315,8 @@ class ModelServer:
                 config=vad_config,
             )
 
-            # PUNC (步骤 2/2)
-            progress_line("加载标点模型...")
+            # PUNC
+            push_progress("punc_loading", "加载标点模型...")
             self._punc = create_punc_processor(
                 self.config["punc"]["model_path"],
                 self.config["punc"]["enabled"]
@@ -306,7 +328,7 @@ class ModelServer:
             if self.config["hotwords"]["load_from_notes"]:
                 notes_path = self.config["hotwords"]["notes_path"]
                 if os.path.exists(notes_path):
-                    progress_line("加载热词...")
+                    push_progress("hotwords_loading", "加载热词...")
                     await loop.run_in_executor(
                         self._executor,
                         self._hotword_manager.load_from_investment_notes,

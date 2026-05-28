@@ -21,7 +21,6 @@ logger = get_logger(__name__, "VAD")
 class VADConfig:
     """VAD配置"""
     mode: str = "sensevoice"
-    threshold: float = 0.5
     min_speech_duration: float = 0.3
     max_speech_duration: float = 4.0
     silence_timeout: float = 2.0

@@ -4,6 +4,7 @@
 
 | 文档 | 说明 |
 |-----|------|
+| [CLIENT_INTEGRATION.md](./CLIENT_INTEGRATION.md) | **客户端集成规范** - 与 su-rec 插件的交互约定 |
 | [PROTOCOL.md](./PROTOCOL.md) | **统一协议文档** - WebSocket/HTTP 接口定义，客户端/服务端共用 |
 | [README.md](./README.md) | 开发文档 - 快速开始、架构、配置 |
 | [ARCHITECTURE_V4.md](./ARCHITECTURE_V4.md) | 架构设计文档 - 三层分离架构设计 |
@@ -12,6 +13,7 @@
 
 ## 快速链接
 
+- [客户端集成规范](./CLIENT_INTEGRATION.md) - 与 su-rec 交互约定
 - [协议文档](./PROTOCOL.md) - 接口定义、消息格式、示例代码
 - [开发文档](./README.md) - 快速开始
 - [架构设计](./ARCHITECTURE_V4.md) - 系统架构

@@ -23,7 +23,6 @@
     "model": "vad_fsmn_pytorch",
     "enabled": true,
     "mode": "fsmn_vad",
-    "threshold": 0.5,
     "min_speech_duration": 0.3,
     "max_speech_duration": 4.0,
     "silence_timeout": 2.0,
