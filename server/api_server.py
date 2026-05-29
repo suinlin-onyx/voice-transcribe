@@ -296,7 +296,19 @@ class APIServer:
                     "timestamp": now_ms()
                 }))
             else:
-                self._model_server.start_transcribing()
+                payload = data.get("payload", {})
+                save_audio = payload.get("save_audio", True)
+                audio_source = payload.get("audio_source", "both")
+                audio_device = payload.get("audio_device", "")
+                recording_dir = payload.get("recording_dir", os.path.join(PROJECT_ROOT, "Recordings"))
+                recording_filename = payload.get("recording_filename", "")
+                self._model_server.start_transcribing(
+                    save_audio=save_audio,
+                    audio_source=audio_source,
+                    audio_device=audio_device,
+                    recording_dir=recording_dir,
+                    recording_filename=recording_filename,
+                )
                 await websocket.send(json.dumps({
                     "id": msg_id,
                     "type": "state_update",
@@ -309,12 +321,13 @@ class APIServer:
 
         # stop_recording
         if action == "stop_recording":
-            self._model_server.stop_transcribing()
+            result = self._model_server.stop_transcribing()
+            audio_files = result.get("audio_files", [])
             await websocket.send(json.dumps({
                 "id": msg_id,
                 "type": "state_update",
                 "status": "idle",
-                "payload": {},
+                "payload": {"audio_files": audio_files},
                 "timestamp": now_ms()
             }))
             await self._send_status()

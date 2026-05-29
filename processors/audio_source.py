@@ -66,9 +66,21 @@ class MicrophoneSource(IAudioSource):
                 except queue.Full:
                     pass  # 丢包处理
 
+        # 支持按名称匹配设备
+        device_id = self.device
+        if isinstance(device_id, str):
+            for i, d in enumerate(sd.query_devices()):
+                if device_id.lower() in d["name"].lower() and d["max_input_channels"] > 0:
+                    device_id = i
+                    logger.info(f"Matched device '{self.device}' → [{i}] {d['name']}")
+                    break
+            else:
+                logger.warning(f"Device '{self.device}' not found, using default")
+                device_id = None
+
         try:
             self._stream = sd.InputStream(
-                device=self.device,
+                device=device_id,
                 samplerate=self.sample_rate,
                 channels=self.channels,
                 dtype='float32',

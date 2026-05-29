@@ -8,6 +8,7 @@ import os
 import time
 import asyncio
 import logging
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from datetime import datetime
@@ -157,6 +158,10 @@ class ModelServer:
         self._models_loaded = False
         self._load_start: Optional[float] = None
         self._is_first_line = True  # 首行标志
+        self._save_audio = True
+        self._audio_buffer: list = []
+        self._recording_dir = ""
+        self._recording_filename = ""
 
         # 回调 (API Server 设置)
         self._on_text_output: Optional[callable] = None
@@ -256,11 +261,64 @@ class ModelServer:
                     device=self.config["audio"]["device"],
                 )
                 log(f"Audio: MicrophoneSource (device={self.config['audio']['device']})")
+        elif source_type == "both":
+            # 同时采集麦克风和系统音频（PC声音）
+            # Loopback 设备必须是立体声（WASAPI loopback 不支持 mono）
+            self._audio_source = MultiSource()
+            mic_source = MicrophoneSource(
+                sample_rate=sample_rate,
+                channels=channels,
+                device=self.config["audio"].get("device"),
+            )
+            loopback_source = LoopbackSource(
+                sample_rate=sample_rate,
+                channels=2,  # WASAPI loopback 强制立体声
+            )
+            self._audio_source.add_source(mic_source)
+            self._audio_source.add_source(loopback_source)
+            log("Audio: MultiSource (microphone + system audio)")
         else:
             raise ValueError(f"Unknown audio source type: {source_type}")
 
         self._audio_source.on_audio(on_audio)
         self._hotword_manager = HotwordManager()
+
+    def _create_audio_source(self, source_type: str):
+        """动态创建音频源（客户端选择）"""
+        sample_rate = self.config["audio"]["sample_rate"]
+        channels = self.config["audio"]["channels"]
+
+        def on_audio(chunk):
+            try:
+                self._audio_queue.put_nowait(chunk)
+            except queue.Full:
+                pass
+
+        if source_type == "loopback":
+            source = LoopbackSource(sample_rate=sample_rate, channels=2)
+            log("Audio: LoopbackSource (system audio output)")
+        elif source_type == "microphone":
+            source = MicrophoneSource(
+                sample_rate=sample_rate, channels=channels,
+                device=self.config["audio"].get("device"),
+            )
+            log(f"Audio: MicrophoneSource")
+        elif source_type == "both":
+            source = MultiSource()
+            mic = MicrophoneSource(
+                sample_rate=sample_rate, channels=channels,
+                device=self.config["audio"].get("device"),
+            )
+            loopback = LoopbackSource(sample_rate=sample_rate, channels=2)
+            source.add_source(mic)
+            source.add_source(loopback)
+            log("Audio: MultiSource (microphone + system audio)")
+        else:
+            raise ValueError(f"Unknown audio source type: {source_type}")
+
+        source.on_audio(on_audio)
+        print(f"[AUDIO] Source created: {source_type}, type={type(source).__name__}")
+        return source
 
     async def load_models(self):
         """加载所有模型，通过 _on_progress 回调推送进度"""
@@ -345,26 +403,48 @@ class ModelServer:
             log(f"Model loading error: {e}")
             raise
 
-    def start_transcribing(self):
+    def start_transcribing(self, save_audio: bool = True, audio_source: str = "",
+                           audio_device: str = "", recording_dir: str = "",
+                           recording_filename: str = ""):
         """开始转写"""
         if not self._models_loaded:
             elapsed = int(time.time() - self._load_start) if self._load_start else 0
             return {"success": False, "message": f"Models still loading ({elapsed}s elapsed)"}
 
+        # 更新设备配置（客户端选择）
+        if audio_device:
+            self.config["audio"]["device"] = audio_device
+
+        # 按客户端选择重建音频源
+        source_type = audio_source or self.config["audio"].get("source", "microphone")
+        try:
+            self._audio_source.stop()
+        except Exception:
+            pass
+        self._audio_source = self._create_audio_source(source_type)
+
         self._transcribing = True
         self._is_first_line = True
+        self._save_audio = save_audio
+        self._recording_dir = recording_dir
+        self._recording_filename = recording_filename
+        self._audio_buffer = []
         if self._vad:
             self._vad.reset()
         self._audio_source.start()
+        log(f"Audio source started: {type(self._audio_source).__name__}")
         return {"success": True, "message": "Transcription started"}
 
     def stop_transcribing(self):
-        """停止转写"""
+        """停止转写，返回录音文件路径列表。"""
         self._transcribing = False
         self._is_first_line = True
 
         # 1. 停止音频采集
-        self._audio_source.stop()
+        try:
+            self._audio_source.stop()
+        except Exception as e:
+            log(f"Audio source stop warning: {e}")
 
         # 2. 清空队列
         while not self._asr_queue.empty():
@@ -378,13 +458,66 @@ class ModelServer:
             except asyncio.QueueEmpty:
                 break
 
-        # 3. 重置 VAD / TextProcessor，清除残留音频缓冲
+        # 3. 保存录音文件
+        audio_files = []
+        if self._save_audio and self._audio_buffer:
+            try:
+                import wave
+                import numpy as np
+                import subprocess
+                import tempfile
+
+                dir_path = self._recording_dir or os.path.join(PROJECT_ROOT, "Recordings")
+                os.makedirs(dir_path, exist_ok=True)
+                ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+                all_audio = np.concatenate(self._audio_buffer)
+                audio_int16 = (all_audio * 32767).clip(-32768, 32767).astype(np.int16)
+
+                # 使用客户端提供的文件名或自动生成
+                if self._recording_filename:
+                    base_name = os.path.splitext(self._recording_filename)[0]
+                else:
+                    base_name = f"录音_{ts}"
+                wav_path = os.path.join(dir_path, f"{base_name}.wav")
+                with wave.open(wav_path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    wf.writeframes(audio_int16.tobytes())
+
+                # 尝试转 WebM（需要 ffmpeg）
+                webm_path = os.path.join(dir_path, f"{base_name}.webm")
+                try:
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", wav_path, "-c:a", "libopus",
+                         "-b:a", "64k", "-f", "webm", webm_path],
+                        capture_output=True, timeout=30, check=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    os.remove(wav_path)  # 删除临时 WAV
+                    audio_files.append(webm_path)
+                    log(f"Audio saved: {webm_path} ({len(audio_int16) / 16000:.1f}s)")
+                except Exception:
+                    # ffmpeg 不可用，保留 WAV
+                    audio_files.append(wav_path)
+                    log(f"Audio saved (WAV, no ffmpeg): {wav_path}")
+            except Exception as e:
+                log(f"Failed to save audio: {e}")
+
+        self._audio_buffer = []
+
+        # 4. 重置 VAD / TextProcessor
         if self._vad:
             self._vad.reset()
         self._text_processor.reset()
 
         log("Transcription stopped and pipeline cleared")
-        return {"success": True, "message": "Transcription stopped"}
+        return {
+            "success": True,
+            "message": "Transcription stopped",
+            "audio_files": audio_files,
+        }
 
     def reload_text_processor(self):
         """热重启 TextProcessor"""
@@ -419,10 +552,20 @@ class ModelServer:
     async def _audio_loop(self):
         """音频采集循环"""
         chunk_count = 0
-        silence_count = 0  # 连续静音计数
+        silence_count = 0
         last_status = None
+        _logged_transcribing = False
 
         while self._running:
+            if not self._transcribing or not self._audio_source:
+                _logged_transcribing = False
+                await asyncio.sleep(0.05)
+                continue
+
+            if not _logged_transcribing:
+                print("[AUDIO] _audio_loop: transcribing started, waiting for chunks...")
+                _logged_transcribing = True
+
             if self._transcribing and self._audio_source:
                 try:
                     try:
@@ -433,6 +576,15 @@ class ModelServer:
 
                     if chunk is not None and len(chunk.data) > 0:
                         chunk_count += 1
+
+                        # 诊断日志（每100块输出一次）
+                        if chunk_count % 100 == 1:
+                            peak = float(np.max(np.abs(chunk.data)))
+                            print(f"🎤 chunk #{chunk_count}, peak={peak:.4f}, samples={len(chunk.data)}")
+
+                        # 音频保存缓冲
+                        if self._save_audio:
+                            self._audio_buffer.append(chunk.data.copy())
 
                         segments = self._vad.process(chunk.data)
 

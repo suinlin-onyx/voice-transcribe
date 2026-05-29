@@ -16,7 +16,7 @@
     "source": "microphone",
     "sample_rate": 16000,
     "channels": 1,
-    "device": null
+    "device": "UGREEN USB MIC"
   },
   "asr": {
     "model": "asr_paraformer_onnx",
